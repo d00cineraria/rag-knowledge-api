@@ -14,7 +14,7 @@ def _load() -> list[dict]:
 
 def test_golden_dataset_has_reasonable_number_of_questions():
     items = _load()
-    assert 20 <= len(items) <= 30
+    assert 20 <= len(items) <= 50
 
 
 def test_golden_dataset_ids_are_unique():

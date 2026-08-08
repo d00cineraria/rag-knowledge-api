@@ -38,8 +38,13 @@ def build_diff_table(
         "|---|---|---|---|",
     ]
     for key in _METRIC_KEYS:
-        va = agg_a.get(key, 0.0)
-        vb = agg_b.get(key, 0.0)
+        va = agg_a.get(key)
+        vb = agg_b.get(key)
+        if va is None or vb is None:
+            fa = f"{va:.3f}" if va is not None else "-"
+            fb = f"{vb:.3f}" if vb is not None else "-"
+            lines.append(f"| {_METRIC_LABELS[key]} | {fa} | {fb} | - |")
+            continue
         diff = vb - va
         sign = "+" if diff >= 0 else ""
         lines.append(f"| {_METRIC_LABELS[key]} | {va:.3f} | {vb:.3f} | {sign}{diff:.3f} |")

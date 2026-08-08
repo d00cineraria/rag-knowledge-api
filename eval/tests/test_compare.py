@@ -3,7 +3,7 @@
 from compare import build_diff_table
 
 
-def _report(recall3: float, faithfulness: float) -> dict:
+def _report(recall3: float, faithfulness: float | None) -> dict:
     return {
         "aggregate": {
             "recall@3": recall3,
@@ -30,3 +30,10 @@ def test_build_diff_table_default_labels():
     table = build_diff_table(_report(0.5, 3.0), _report(0.5, 3.0))
     assert "| A | B |" in table
     assert "+0.000" in table
+
+
+def test_build_diff_table_handles_retrieval_only_reports():
+    """faithfulness/answer_relevancyがNone（--retrieval-only実行）でもクラッシュしない。"""
+    table = build_diff_table(_report(0.5, None), _report(0.7, None))
+    assert "+0.200" in table
+    assert "| faithfulness (1-5) | - | - | - |" in table

@@ -10,8 +10,14 @@
 | `info_security_policy.md` | 情報セキュリティ規程（同上） | 自作・CC0 |
 | `remote_work_policy.md` | テレワーク規程（同上） | 自作・CC0 |
 | `expense_policy.md` | 出張旅費規程（同上） | 自作・CC0 |
+| `subsidiary_travel_expense_policy.md` | 出張旅費規程（完全子会社「株式会社サンプルテクノロジー」版。`expense_policy.md`と類似だが異なる金額基準） | 自作・CC0 |
+| `childcare_leave_policy.md` | 育児・介護休業規程（同上。`employment_rules.md`の休暇章と語彙が重複するが別制度） | 自作・CC0 |
+| `employment_rules_2020_legacy.md` | 就業規則(2020年旧版)（`employment_rules.md`の旧版という設定。見出しは同一だが一部数値のみ異なり、現在は失効） | 自作・CC0 |
+| `vendor_security_standard.md` | 業務委託先セキュリティ基準（`info_security_policy.md`と語彙が重複するが対象は委託先） | 自作・CC0 |
 
 架空の企業名・数値（賃金計算日、手当額、上限日数等）を用いており、実在の制度・法令の正確性を保証するものではなく、評価用データセット（`eval/golden/golden.jsonl`）の検索・生成精度計測のためだけに作成されています。
+
+Phase 2（評価セットの識別力強化）で追加した4文書（`subsidiary_travel_expense_policy.md` / `childcare_leave_policy.md` / `employment_rules_2020_legacy.md` / `vendor_security_standard.md`）は、いずれも**意図的に既存文書と語彙・数値が紛らわしくなるよう自作したモック文書**です。実在の企業・制度とは一切関係ありません。
 
 ## 見出し構造
 
