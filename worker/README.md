@@ -1,9 +1,10 @@
 # worker — 取り込みワーカー (Go)
 
 Python API (`api/`) と同じSQLiteファイルをポーリングし、`status='embedding'` の
-documentに対してGemini embeddingを実行し、`chunk_vectors` へ書き込むバックグラウンド
+documentに対してembeddingを実行し、`chunk_vectors` へ書き込むバックグラウンド
 プロセス。チャンキング自体はPython側（`api/app/services/ingest`）に一本化されており、
-このワーカーは「チャンク本文 → ベクトル」の変換だけを担う。
+このワーカーは「チャンク本文 → ベクトル」の変換だけを担う。embeddingプロバイダは
+Ollama（既定・ローカル・APIキー不要）とGemini（クラウド）を`LLM_PROVIDER`で切り替えられる。
 
 ## 役割
 
@@ -11,8 +12,8 @@ documentに対してGemini embeddingを実行し、`chunk_vectors` へ書き込�
    `chunks`/`chunks_fts` へのINSERTまでを行い、`documents.status='embedding'` で処理を止める
 2. このワーカーが `status='embedding'` のdocumentを2秒間隔（既定）でポーリングし、
    1件を原子的にclaim（`status='embedding_processing'` へ更新）する
-3. そのdocumentの未embeddingチャンクをまとめてGemini `batchEmbedContents` に投げ、
-   L2正規化してから `chunk_vectors` へ書き込む
+3. そのdocumentの未embeddingチャンクをまとめて設定されたプロバイダ（Ollama `/api/embed`
+   またはGemini `batchEmbedContents`）に投げ、L2正規化してから `chunk_vectors` へ書き込む
 4. 成功したら `status='ready'`、失敗したら `status='error'` + エラーメッセージ（最大2000字）
 
 `INGEST_MODE=inline`（既定）のときはPython側がembeddingまで完結するため、このワーカーは
@@ -28,8 +29,13 @@ go mod download
 go vet ./...
 go test ./...
 
-# 起動（api/ 側と同じSQLITE_PATHを指すこと）
+# 起動（api/ 側と同じSQLITE_PATHを指すこと。既定プロバイダはollama）
 SQLITE_PATH=../api/data/rag.db \
+go run .
+
+# Geminiプロバイダを使う場合
+SQLITE_PATH=../api/data/rag.db \
+LLM_PROVIDER=gemini \
 GEMINI_API_KEY=... \
 go run .
 ```
@@ -39,9 +45,12 @@ go run .
 | 変数 | 既定値 | 説明 |
 |---|---|---|
 | `SQLITE_PATH` | `./data/rag.db` | Python APIと共有するSQLiteファイル |
-| `GEMINI_API_KEY` | (必須) | Gemini embedding APIキー |
-| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | embeddingモデル名 |
-| `EMBED_DIM` | `768` | 出力次元（`outputDimensionality`） |
+| `LLM_PROVIDER` | `ollama` | embeddingプロバイダ（`ollama` \| `gemini`） |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | OllamaのベースURL（`LLM_PROVIDER=ollama`時） |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Ollama embeddingモデル名 |
+| `GEMINI_API_KEY` | (未設定可) | Gemini embedding APIキー。`LLM_PROVIDER=gemini`のときのみ必須 |
+| `GEMINI_EMBED_MODEL` | `gemini-embedding-001` | Gemini embeddingモデル名 |
+| `EMBED_DIM` | `768` | 出力次元（Gemini `outputDimensionality`。Ollama側はモデル固有の次元をそのまま使う） |
 | `POLL_INTERVAL_SECONDS` | `2` | ポーリング間隔（秒） |
 
 `Ctrl-C` (SIGINT) または SIGTERM で graceful shutdown する（処理中のドキュメントは
@@ -51,10 +60,10 @@ go run .
 
 ```
 worker/
-├── main.go                    # エントリーポイント。設定読込→DB接続→シグナル待受
+├── main.go                    # エントリーポイント。設定読込→プロバイダ選択→DB接続→シグナル待受
 └── internal/
     ├── config/                # 環境変数の読み込み
-    ├── embedding/              # Gemini batchEmbedContents クライアント + L2正規化
+    ├── embedding/              # Gemini batchEmbedContents / Ollama /api/embed クライアント + L2正規化
     ├── store/                  # SQLite操作（claim / pending chunks / insert / mark ready|error）
     └── worker/                 # ポーリングループの本体（store と embedding を組み合わせる）
 ```
@@ -90,9 +99,12 @@ PHPのクラスに近いが、継承はなくコンポジション（構造体�
 
 `internal/worker/worker.go` の `Embedder` インターフェースは
 `Embed(ctx, texts) ([][]float32, error)` という1メソッドのシグネチャだけを定義する。
-`internal/embedding.Client` はこのメソッドを実装しているというだけで、明示的な
-`implements` 宣言なしに `Embedder` として扱える（構造的型付け）。テストでは
-`fakeEmbedder` を代わりに渡すことで、HTTP通信なしにワーカーのロジックだけ検証できる。
+`internal/embedding.Client`（Gemini）と `internal/embedding.OllamaClient`（Ollama）は
+どちらもこのメソッドを実装しているというだけで、明示的な `implements` 宣言なしに
+`Embedder` として扱える（構造的型付け）。`main.go` は `LLM_PROVIDER` の値に応じて
+どちらの実装を `worker.New` に渡すか切り替えているだけで、`worker.go`・`store.go` は
+プロバイダの違いを一切知らない。テストでは `fakeEmbedder` を代わりに渡すことで、
+HTTP通信なしにワーカーのロジックだけ検証できる。
 
 ### 5. エラーハンドリング: `error` 型と `%w` によるラップ
 
