@@ -196,8 +196,11 @@ def _real_query_fn(
     include_answer: bool = True,
     timeout: float = 300.0,
 ) -> QueryFn:
-    """timeout既定300秒: Ollamaの推論モデル(qwen3.5:9b等)は出典付き生成に
-    60秒を超えることがあり、短いタイムアウトだとリトライしても常に失敗する。"""
+    """timeout既定300秒: Ollamaの推論モデルは出典付き生成が60秒を超えることが
+    あり、短いタイムアウトだとリトライしても常に失敗する。モデル自体が極端に
+    遅い場合（例: qwen3.5:9bは実測15分超でも完了しないことがあった）は
+    300秒でも足りないため、タイムアウト延長ではなくモデル選定で解決すること
+    （README「生成指標実測」節参照）。"""
 
     async def _post(question: str, top_k: int) -> dict[str, Any]:
         async with httpx.AsyncClient(base_url=api_url, timeout=timeout) as client:

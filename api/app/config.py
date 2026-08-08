@@ -6,7 +6,10 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"  # "ollama" | "gemini"
     ollama_base_url: str = "http://localhost:11434"
     ollama_embed_model: str = "nomic-embed-text"
-    ollama_chat_model: str = "qwen3.5:9b"
+    # qwen3.5:9bは実測で出典付き生成1問に15分超かかり評価が完走しなかった
+    # （thinkingモデルの長考+同時ロード時のGPU競合）。laguna-xs-2.1(Ollama公式
+    # ライブラリ, 33.4B)は同条件で約22秒/問。既定をこちらに変更。
+    ollama_chat_model: str = "laguna-xs-2.1"
     gemini_api_key: str = ""
     gemini_chat_model: str = "gemini-2.5-flash"
     gemini_embed_model: str = "gemini-embedding-001"

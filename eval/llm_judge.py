@@ -47,7 +47,7 @@ def _ollama_base_url() -> str:
 
 def _ollama_judge_model() -> str:
     return os.environ.get("OLLAMA_JUDGE_MODEL") or os.environ.get(
-        "OLLAMA_CHAT_MODEL", "qwen3.5:9b"
+        "OLLAMA_CHAT_MODEL", "laguna-xs-2.1"
     )
 
 

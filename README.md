@@ -7,7 +7,7 @@ Markdown/PDFをアップロードすると、**出典引用付き**でQAでき�
 
 特徴は4つ:
 
-1. **完全ローカル、APIキー不要がデフォルト** — embedding・回答生成・評価のLLM-as-judgeまで全てOllama（`nomic-embed-text` + `qwen3.5:9b`）で完結。`LLM_PROVIDER=gemini`でクラウド品質へ切替可能な、プロバイダ抽象化アーキテクチャ
+1. **完全ローカル、APIキー不要がデフォルト** — embedding・回答生成・評価のLLM-as-judgeまで全てOllama（`nomic-embed-text` + `laguna-xs-2.1`）で完結。`LLM_PROVIDER=gemini`でクラウド品質へ切替可能な、プロバイダ抽象化アーキテクチャ
 2. **単一ファイルDBでゼロ運用** — SQLite + sqlite-vec（ベクトル検索）+ FTS5 trigram（日本語BM25）。DBサーバー不要、`uvicorn`起動だけで動く
 3. **日本語ハイブリッド検索** — BM25とベクトル検索をRRFで融合し、オプションでbge-reranker-v2-m3によるリランク
 4. **評価基盤を内蔵** — goldenデータセット44問に対して recall@k / MRR / nDCG / faithfulness を計測し、チャンク戦略や検索設定の変更を**数値で**判断できる
@@ -26,7 +26,7 @@ Markdown/PDFをアップロードすると、**出典引用付き**でQAでき�
 [SQLite (単一ファイル)]  [LLMプロバイダ抽象化]    [bge-reranker-v2-m3]
  sqlite-vec (KNN)        Ollama(既定・ローカル)   CPU / optional
  FTS5 trigram (BM25)      nomic-embed-text
-                          qwen3.5:9b
+                          laguna-xs-2.1
                          Gemini(オプション)
                           gemini-embedding-001
                           gemini-2.5-flash
@@ -50,7 +50,7 @@ Markdown/PDFをアップロードすると、**出典引用付き**でQAでき�
 ```bash
 # 1. Ollamaを用意（未導入なら https://ollama.com/download ）
 ollama pull nomic-embed-text
-ollama pull qwen3.5:9b
+ollama pull laguna-xs-2.1
 
 # 2. APIキー設定は不要（LLM_PROVIDER=ollamaが既定）
 cp .env.example .env
@@ -100,8 +100,8 @@ python eval/compare.py eval/results/<before>/report.json eval/results/<after>/re
 ```
 
 - **検索指標**: recall@3 / recall@8 / MRR / nDCG@8（filename + heading_pathの連続部分列一致で正解判定）
-- **生成指標**: faithfulness / answer_relevancy（Gemini構造化出力によるLLM-as-judge）
-- `--retrieval-only` は生成APIを一切呼ばない（Gemini無料枠の日次クォータを消費しない）
+- **生成指標**: faithfulness / answer_relevancy（構造化出力によるLLM-as-judge。既定Ollama、`LLM_PROVIDER=gemini`でGeminiに切替）
+- `--retrieval-only` は生成APIを一切呼ばない（Gemini使用時に無料枠の日次クォータを消費しない。Ollama既定なら通常は不要）
 
 ### ベースライン実測（2026-08-08, retrieval-only, 22問）
 
@@ -157,6 +157,25 @@ Phase 4でOllamaを既定プロバイダにしたため、同一golden・同一�
 
 この難化させた44問（Phase 2で追加した紛らわしい旧版・類似規程を含む）では、単体だとGemini embeddingが全指標でOllama(nomic-embed-text)を上回る。**しかしbge-reranker-v2-m3（CPU・無料）を有効にするだけで、Ollama側はrecall@3・MRR・nDCG@8でGemini単体を逆転する**（recall@8のみGeminiの1.000にわずかに届かない）。つまり「ローカル埋め込みの精度不足」は「無料のリランカー1枚」でほぼ解消でき、**ゼロ円のまま実用精度に到達する**という結論が数値で得られた。`LLM_PROVIDER=ollama` かつ `RERANKER_ENABLED=true` を既定の推奨構成とする。
 
+### 生成指標実測: laguna-xs-2.1（2026-08-09, リランカーOFF, 44問, 生成+LLM-as-judge）
+
+Ollamaでの生成モデルは当初`qwen3.5:9b`を既定にしていたが、フル評価（44問、出典付き回答生成→LLM-as-judge）を実行したところ**1問の生成に15分（900秒）を超えてもタイムアウトし、評価が完走しなかった**。原因調査のため同一質問・同一環境で計測したところ:
+
+| モデル | 1問あたりの生成時間 |
+|---|---|
+| `qwen3.5:9b`（thinking, 9B） | 15分超（タイムアウト、実用不可） |
+| `laguna-xs-2.1`（thinking, 33.4B, Ollama公式ライブラリ） | **約22秒** |
+
+パラメータ数はlaguna-xs-2.1の方が約3.7倍大きいにもかかわらず大幅に速い。両モデルを同時にOllamaへ常駐させていたことによるGPU競合が主因とみられる（`ollama ps`で両方が`100% GPU`表示だった）。生成モデルを既定`laguna-xs-2.1`に変更し、同条件で44問のフル評価を完走させた:
+
+| 指標 | 値 |
+|---|---|
+| recall@3 / recall@8 / MRR / nDCG@8 | 0.824 / 0.878 / 0.712 / 0.746（検索部分はembeddingプロバイダ比較のOllama単体・リランカーOFFと同一設定） |
+| faithfulness (1-5) | **4.95** |
+| answer_relevancy (1-5) | **4.00** |
+
+faithfulness（出典への忠実性）はほぼ満点で、幻覚が少ないことを確認。answer_relevancyがやや低いのは、検索が外れた質問（q001, q006, q027, q029など recall@3=0.000）で「出典に情報がない」という正直な回答をしたぶん関連性スコアが下がったためで、検索精度側の課題（上記リランカー節参照）が主因。生成モデル自体の応答品質は良好と判断した。
+
 ## 設計上の主な判断
 
 | 論点 | 判断 | 理由 |
@@ -177,7 +196,7 @@ Phase 4でOllamaを既定プロバイダにしたため、同一golden・同一�
 - [x] Phase 2: 評価セットの識別力強化（文書追加・言い換え・複数文書横断問題）※生成指標の実測はGemini生成API無料枠回復後に別途実施
 - [x] Phase 3: 取り込みワーカーのGo実装（`INGEST_MODE=worker`、[worker/README.md](worker/README.md)）
 - [x] Phase 4: Ollamaプロバイダ対応（embedding・生成・LLM-as-judgeを`LLM_PROVIDER`で切替、既定ollama・APIキー不要）
-- [ ] Phase 5: 生成指標（faithfulness/answer_relevancy）の実測（Ollama常駐化でクォータ制約なく再測定）
+- [x] Phase 5: 生成指標（faithfulness/answer_relevancy）の実測（laguna-xs-2.1でfaithfulness 4.95, answer_relevancy 4.00）
 
 ## 開発
 
