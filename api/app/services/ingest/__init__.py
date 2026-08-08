@@ -1,7 +1,7 @@
 """取り込みパイプライン。
 
 ./data/raw/{document_id} のファイルをパース→見出し考慮チャンキング→
-embedding（768次元・正規化、Gemini/OllamaはEMBEDDING_PROVIDERで切替）→
+embedding（768次元・正規化、Gemini/OllamaはLLM_PROVIDERで切替）→
 chunks / chunks_fts / chunk_vectors へ INSERT → documents.status を更新する。
 """
 
