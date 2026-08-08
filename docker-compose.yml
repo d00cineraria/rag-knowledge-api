@@ -29,5 +29,12 @@ services:
       db:
         condition: service_healthy
 
+  ui:
+    build: ./ui  # NEXT_PUBLIC_API_URLはビルド時埋め込み（デフォルト http://localhost:8000）
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
 volumes:
   db-data:
