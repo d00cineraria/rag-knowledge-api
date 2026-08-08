@@ -1,0 +1,4 @@
+# RERANKER_ENABLED=true のときのみ必要（重いのでrequirements.txtには含めない）。
+# bge-reranker-v2-m3 (CrossEncoder, CPU推論)
+sentence-transformers>=3.0
+torch>=2.2
