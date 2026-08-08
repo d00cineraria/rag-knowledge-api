@@ -25,7 +25,18 @@ Markdown/PDFをアップロードすると、**出典引用付き**でQAでき�
 [SQLite (単一ファイル)]  [Gemini API]           [bge-reranker-v2-m3]
  sqlite-vec (KNN)        gemini-embedding-001    CPU / optional
  FTS5 trigram (BM25)     gemini-2.5-flash
+        ▲
+        │ status='embedding' をポーリング (INGEST_MODE=worker のときのみ)
+        │
+[Go worker (worker/)]
+ batchEmbedContents でembedding → chunk_vectors へ書き込み
 ```
+
+**`INGEST_MODE`**（既定 `inline`）:
+- `inline`: FastAPIがパース→チャンキング→embeddingまで1プロセスで完結（クイックスタート向け）
+- `worker`: FastAPIはパース→チャンキング→`chunks`/`chunks_fts`のINSERTまでで
+  `status='embedding'`にして止め、embeddingは別プロセスの`worker/`（Go実装）が担う。
+  詳細は [worker/README.md](worker/README.md)
 
 ## クイックスタート（Docker不要）
 
@@ -137,7 +148,7 @@ python eval/compare.py eval/results/<before>/report.json eval/results/<after>/re
 - [x] Phase 1: Python MVP（取り込み / ハイブリッド検索 / SSE回答 / 評価基盤 / UI）
 - [x] Phase 1.5: SQLite + sqlite-vec によるローカル完結化（PostgreSQL版は`v0.1-postgres`）
 - [x] Phase 2: 評価セットの識別力強化（文書追加・言い換え・複数文書横断問題）※生成指標の実測はGemini生成API無料枠回復後に別途実施
-- [ ] Phase 3: 取り込みワーカーのGo実装
+- [x] Phase 3: 取り込みワーカーのGo実装（`INGEST_MODE=worker`、[worker/README.md](worker/README.md)）
 
 ## 開発
 

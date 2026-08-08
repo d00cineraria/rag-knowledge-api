@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     max_upload_mb: int = 20
     reranker_enabled: bool = False
     data_dir: str = "./data"
+    # "inline": process_documentがembeddingまで完結する（既定・従来動作）。
+    # "worker": process_documentはchunks/chunks_ftsへのINSERTまでで止め、
+    #           status='embedding'とし、embeddingはGoワーカー（worker/）に委ねる。
+    ingest_mode: str = "inline"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

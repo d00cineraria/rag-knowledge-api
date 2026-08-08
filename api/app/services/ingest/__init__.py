@@ -60,8 +60,12 @@ async def process_document(document_id: UUID) -> None:
         if not chunks:
             raise ValueError("no extractable content in document")
 
-        embedder = GeminiEmbedder()
-        vectors = await embedder.embed([c.content for c in chunks])
+        is_worker_mode = settings.ingest_mode == "worker"
+
+        vectors: list[list[float]] | None = None
+        if not is_worker_mode:
+            embedder = GeminiEmbedder()
+            vectors = await embedder.embed([c.content for c in chunks])
 
         # 再取り込みに備えて既存チャンクを全消去してから書き直す
         cursor = await conn.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_id,))
@@ -71,8 +75,10 @@ async def process_document(document_id: UUID) -> None:
             await conn.execute("DELETE FROM chunk_vectors WHERE chunk_id = ?", (old_id,))
         await conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
 
-        for idx, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
+        chunk_ids = []
+        for idx, chunk in enumerate(chunks):
             chunk_id = str(uuid4())
+            chunk_ids.append(chunk_id)
             await conn.execute(
                 """
                 INSERT INTO chunks
@@ -94,15 +100,20 @@ async def process_document(document_id: UUID) -> None:
                 "INSERT INTO chunks_fts (chunk_id, content) VALUES (?, ?)",
                 (chunk_id, chunk.content),
             )
-            await conn.execute(
-                "INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)",
-                (chunk_id, serialize_vector(vector)),
-            )
 
+        if vectors is not None:
+            for chunk_id, vector in zip(chunk_ids, vectors, strict=True):
+                await conn.execute(
+                    "INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)",
+                    (chunk_id, serialize_vector(vector)),
+                )
+
+        # workerモードではembeddingをGoワーカーに委ねるため'embedding'で止める。
+        next_status = "embedding" if is_worker_mode else "ready"
         await conn.execute(
-            "UPDATE documents SET status = 'ready', error = NULL, "
+            "UPDATE documents SET status = ?, error = NULL, "
             "updated_at = datetime('now') WHERE id = ?",
-            (doc_id,),
+            (next_status, doc_id),
         )
         await conn.commit()
     except Exception as exc:

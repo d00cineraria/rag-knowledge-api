@@ -120,6 +120,54 @@ async def test_process_document_embedding_failure_sets_error(sqlite_db, monkeypa
     assert "mock" in (error or "")
 
 
+async def test_process_document_worker_mode_stops_before_embedding(sqlite_db, monkeypatch):
+    """INGEST_MODE=workerではGeminiEmbedderを呼ばず、chunks/chunks_ftsだけ書いて
+    status='embedding'で止まる（chunk_vectorsは空のまま）。"""
+
+    def _fail_if_constructed():
+        raise AssertionError("worker mode must not construct GeminiEmbedder")
+
+    monkeypatch.setattr(ingest, "GeminiEmbedder", lambda: _fail_if_constructed())
+    monkeypatch.setattr(settings, "ingest_mode", "worker")
+
+    _, document_id = await _seed_document(
+        sqlite_db, content="# タイトル\n\n## 第1章\n\n本文です。\n".encode()
+    )
+
+    await ingest.process_document(document_id)
+
+    status, error = await _status(sqlite_db, document_id)
+    assert (status, error) == ("embedding", None)
+
+    cursor = await sqlite_db.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE document_id = ?", (document_id,)
+    )
+    n_chunks = (await cursor.fetchone())["n"]
+    assert n_chunks >= 1
+    cursor = await sqlite_db.execute("SELECT COUNT(*) AS n FROM chunks_fts")
+    assert (await cursor.fetchone())["n"] == n_chunks
+    cursor = await sqlite_db.execute("SELECT COUNT(*) AS n FROM chunk_vectors")
+    assert (await cursor.fetchone())["n"] == 0
+
+
+async def test_process_document_inline_mode_unaffected_by_worker_mode_default(
+    sqlite_db, monkeypatch
+):
+    """settings.ingest_modeの既定値'inline'では従来通りembeddingまで完結する。"""
+    assert settings.ingest_mode == "inline"
+    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    _, document_id = await _seed_document(
+        sqlite_db, content="# タイトル\n\n## 第1章\n\n本文です。\n".encode()
+    )
+
+    await ingest.process_document(document_id)
+
+    status, error = await _status(sqlite_db, document_id)
+    assert (status, error) == ("ready", None)
+    cursor = await sqlite_db.execute("SELECT COUNT(*) AS n FROM chunk_vectors")
+    assert (await cursor.fetchone())["n"] >= 1
+
+
 async def test_reingest_replaces_existing_chunks(sqlite_db, monkeypatch):
     monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
     _, document_id = await _seed_document(
