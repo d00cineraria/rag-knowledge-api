@@ -1,33 +1,13 @@
+# ローカル完結構成: DBは単一ファイルのSQLite（./data/rag.db）。
+# Dockerなしでも api/ で `uvicorn app.main:app` するだけで動く（README参照）。
 services:
-  db:
-    build: ./db
-    environment:
-      POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag_dev_password
-      POSTGRES_DB: rag
-    ports:
-      - "5432:5432"
-    volumes:
-      - db-data:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   api:
     build: ./api
     env_file: .env
-    environment:
-      DATABASE_URL: postgresql://rag:rag_dev_password@db:5432/rag
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/data
-    depends_on:
-      db:
-        condition: service_healthy
+      - ./data:/app/data
 
   ui:
     build: ./ui  # NEXT_PUBLIC_API_URLはビルド時埋め込み（デフォルト http://localhost:8000）
@@ -35,6 +15,3 @@ services:
       - "3000:3000"
     depends_on:
       - api
-
-volumes:
-  db-data:

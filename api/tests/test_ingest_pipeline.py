@@ -1,183 +1,136 @@
-"""GeminiクライアントとDBプールをモックしてprocess_documentの制御フローを検証する。"""
+"""取り込みパイプラインの統合テスト。
 
-from pathlib import Path
+一時ファイルの実SQLite（sqlite-vec + FTS5）に対して process_document を実行する。
+外部I/OはGemini embeddingのみモックする。
+"""
+
 from uuid import uuid4
 
 import pytest
 
-import app.services.ingest as ingest_module
+from app import db as db_module
 from app.config import settings
-
-
-class _NullTransaction:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakeConn:
-    def __init__(self):
-        self.deleted: list[tuple] = []
-        self.inserted: list[tuple] = []
-
-    async def execute(self, query, *args):
-        assert query.strip().startswith("DELETE")
-        self.deleted.append(args)
-
-    async def executemany(self, query, args_list):
-        self.inserted.extend(args_list)
-
-    def transaction(self):
-        return _NullTransaction()
-
-
-class _AcquireContext:
-    def __init__(self, conn):
-        self._conn = conn
-
-    async def __aenter__(self):
-        return self._conn
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakePool:
-    def __init__(self, row):
-        self._row = row
-        self.conn = _FakeConn()
-        self.updates: list[tuple[str, tuple]] = []
-
-    async def fetchrow(self, query, *args):
-        return self._row
-
-    async def execute(self, query, *args):
-        self.updates.append((query, args))
-
-    def acquire(self):
-        return _AcquireContext(self.conn)
+from app.services import ingest
 
 
 class _FakeEmbedder:
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, dim: int = 768, fail: bool = False):
+        self.dim = dim
+        self.fail = fail
 
-    async def embed(self, texts):
-        return [[1.0, 0.0, 0.0] for _ in texts]
-
-
-def _status_updates(pool: _FakePool, status: str) -> list[tuple[str, tuple]]:
-    return [(q, a) for q, a in pool.updates if f"'{status}'" in q]
-
-
-@pytest.fixture(autouse=True)
-def _isolate_data_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "data_dir", str(tmp_path))
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        if self.fail:
+            raise RuntimeError("embedding failed (mock)")
+        return [[1.0 / self.dim] * self.dim for _ in texts]
 
 
-def _write_raw(document_id, content: bytes) -> None:
-    raw_dir = Path(settings.data_dir) / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    (raw_dir / str(document_id)).write_bytes(content)
+@pytest.fixture
+async def sqlite_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "sqlite_path", str(tmp_path / "test.db"))
+    monkeypatch.setattr(settings, "data_dir", str(tmp_path / "data"))
+    conn = await db_module.init_db()
+    yield conn
+    await db_module.close_db()
 
 
-async def test_process_document_success_inserts_chunks_and_marks_ready(monkeypatch):
-    document_id = uuid4()
-    collection_id = uuid4()
-    _write_raw(document_id, "# 見出し\n\n本文です。\n".encode())
-
-    fake_pool = _FakePool({"collection_id": collection_id, "content_type": "text/markdown"})
-    monkeypatch.setattr(ingest_module, "pool", lambda: fake_pool)
-    monkeypatch.setattr(ingest_module, "GeminiEmbedder", _FakeEmbedder)
-
-    await ingest_module.process_document(document_id)
-
-    assert len(_status_updates(fake_pool, "processing")) == 1
-    ready_updates = _status_updates(fake_pool, "ready")
-    assert len(ready_updates) == 1
-    assert ready_updates[0][1][0] == document_id
-    assert _status_updates(fake_pool, "error") == []
-
-    assert len(fake_pool.conn.inserted) == 1
-    row = fake_pool.conn.inserted[0]
-    doc_id, coll_id, chunk_index, content, heading_path, token_count, embedding = row
-    assert doc_id == document_id
-    assert coll_id == collection_id
-    assert chunk_index == 0
-    assert content == "本文です。"
-    assert heading_path == ["見出し"]
-    assert token_count >= 1
-    assert embedding == [1.0, 0.0, 0.0]
-
-
-async def test_process_document_missing_row_is_noop(monkeypatch):
-    fake_pool = _FakePool(None)
-    monkeypatch.setattr(ingest_module, "pool", lambda: fake_pool)
-
-    await ingest_module.process_document(uuid4())
-
-    assert fake_pool.updates == []
-
-
-async def test_process_document_unsupported_content_type_sets_error(monkeypatch):
-    document_id = uuid4()
-    collection_id = uuid4()
-    _write_raw(document_id, b"dummy")
-
-    fake_pool = _FakePool(
-        {"collection_id": collection_id, "content_type": "application/octet-stream"}
+async def _seed_document(conn, *, content: bytes, content_type: str = "text/markdown"):
+    collection_id, document_id = str(uuid4()), str(uuid4())
+    await conn.execute(
+        "INSERT INTO collections (id, name) VALUES (?, ?)", (collection_id, f"c-{collection_id}")
     )
-    monkeypatch.setattr(ingest_module, "pool", lambda: fake_pool)
-    monkeypatch.setattr(ingest_module, "GeminiEmbedder", _FakeEmbedder)
-
-    with pytest.raises(ValueError, match="unsupported content_type"):
-        await ingest_module.process_document(document_id)
-
-    error_updates = _status_updates(fake_pool, "error")
-    assert len(error_updates) == 1
-    assert "unsupported content_type" in error_updates[0][1][1]
-    assert fake_pool.conn.inserted == []
-
-
-async def test_process_document_empty_content_sets_error(monkeypatch):
-    document_id = uuid4()
-    collection_id = uuid4()
-    _write_raw(document_id, b"   \n\n  ")
-
-    fake_pool = _FakePool({"collection_id": collection_id, "content_type": "text/markdown"})
-    monkeypatch.setattr(ingest_module, "pool", lambda: fake_pool)
-    monkeypatch.setattr(ingest_module, "GeminiEmbedder", _FakeEmbedder)
-
-    with pytest.raises(ValueError, match="no extractable content"):
-        await ingest_module.process_document(document_id)
-
-    error_updates = _status_updates(fake_pool, "error")
-    assert len(error_updates) == 1
+    await conn.execute(
+        """
+        INSERT INTO documents (id, collection_id, filename, content_type, content_sha256)
+        VALUES (?, ?, 'doc.md', ?, ?)
+        """,
+        (document_id, collection_id, content_type, document_id),
+    )
+    await conn.commit()
+    raw_dir = __import__("pathlib").Path(settings.data_dir) / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / document_id).write_bytes(content)
+    return collection_id, document_id
 
 
-async def test_process_document_embedding_failure_sets_error(monkeypatch):
-    document_id = uuid4()
-    collection_id = uuid4()
-    _write_raw(document_id, "# 見出し\n\n本文です。\n".encode())
+async def _status(conn, document_id: str) -> tuple[str, str | None]:
+    cursor = await conn.execute(
+        "SELECT status, error FROM documents WHERE id = ?", (document_id,)
+    )
+    row = await cursor.fetchone()
+    return row["status"], row["error"]
 
-    fake_pool = _FakePool({"collection_id": collection_id, "content_type": "text/markdown"})
-    monkeypatch.setattr(ingest_module, "pool", lambda: fake_pool)
 
-    class _FailingEmbedder:
-        def __init__(self, *args, **kwargs):
-            pass
+async def test_process_document_success_inserts_chunks_and_marks_ready(
+    sqlite_db, monkeypatch
+):
+    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    _, document_id = await _seed_document(
+        sqlite_db, content="# タイトル\n\n## 第1章\n\n本文です。\n".encode()
+    )
 
-        async def embed(self, texts):
-            raise RuntimeError("gemini api down")
+    await ingest.process_document(document_id)
 
-    monkeypatch.setattr(ingest_module, "GeminiEmbedder", _FailingEmbedder)
+    status, error = await _status(sqlite_db, document_id)
+    assert (status, error) == ("ready", None)
+    cursor = await sqlite_db.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE document_id = ?", (document_id,)
+    )
+    n_chunks = (await cursor.fetchone())["n"]
+    assert n_chunks >= 1
+    cursor = await sqlite_db.execute("SELECT COUNT(*) AS n FROM chunks_fts")
+    assert (await cursor.fetchone())["n"] == n_chunks
+    cursor = await sqlite_db.execute("SELECT COUNT(*) AS n FROM chunk_vectors")
+    assert (await cursor.fetchone())["n"] == n_chunks
 
-    with pytest.raises(RuntimeError, match="gemini api down"):
-        await ingest_module.process_document(document_id)
 
-    error_updates = _status_updates(fake_pool, "error")
-    assert len(error_updates) == 1
-    assert "gemini api down" in error_updates[0][1][1]
-    assert fake_pool.conn.inserted == []
+async def test_process_document_missing_row_is_noop(sqlite_db):
+    await ingest.process_document(str(uuid4()))  # 例外にならないこと
+
+
+async def test_process_document_unsupported_content_type_sets_error(sqlite_db, monkeypatch):
+    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    _, document_id = await _seed_document(
+        sqlite_db, content=b"x", content_type="application/zip"
+    )
+    with pytest.raises(ValueError):
+        await ingest.process_document(document_id)
+    status, error = await _status(sqlite_db, document_id)
+    assert status == "error"
+    assert "unsupported" in (error or "")
+
+
+async def test_process_document_empty_content_sets_error(sqlite_db, monkeypatch):
+    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    _, document_id = await _seed_document(sqlite_db, content=b"")
+    with pytest.raises(ValueError):
+        await ingest.process_document(document_id)
+    status, _ = await _status(sqlite_db, document_id)
+    assert status == "error"
+
+
+async def test_process_document_embedding_failure_sets_error(sqlite_db, monkeypatch):
+    monkeypatch.setattr(
+        ingest, "GeminiEmbedder", lambda: _FakeEmbedder(fail=True)
+    )
+    _, document_id = await _seed_document(sqlite_db, content="# t\n\n本文\n".encode())
+    with pytest.raises(RuntimeError):
+        await ingest.process_document(document_id)
+    status, error = await _status(sqlite_db, document_id)
+    assert status == "error"
+    assert "mock" in (error or "")
+
+
+async def test_reingest_replaces_existing_chunks(sqlite_db, monkeypatch):
+    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    _, document_id = await _seed_document(
+        sqlite_db, content="# t\n\n## A\n\n本文A\n".encode()
+    )
+    await ingest.process_document(document_id)
+    await ingest.process_document(document_id)  # 再取り込み
+
+    cursor = await sqlite_db.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE document_id = ?", (document_id,)
+    )
+    n_chunks = (await cursor.fetchone())["n"]
+    cursor = await sqlite_db.execute("SELECT COUNT(*) AS n FROM chunks_fts")
+    assert (await cursor.fetchone())["n"] == n_chunks  # 二重登録されない

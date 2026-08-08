@@ -1,7 +1,9 @@
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import require_api_key
-from app.db import pool
+from app.db import db
 from app.schemas import Collection, CollectionCreate
 
 router = APIRouter(prefix="/v1/collections", tags=["collections"])
@@ -11,23 +13,28 @@ router = APIRouter(prefix="/v1/collections", tags=["collections"])
 async def create_collection(
     body: CollectionCreate, _: str = Depends(require_api_key)
 ) -> Collection:
-    row = await pool().fetchrow(
+    collection_id = str(uuid4())
+    cursor = await db().execute(
         """
-        INSERT INTO collections (name, description) VALUES ($1, $2)
-        ON CONFLICT (name) DO NOTHING
-        RETURNING id, name, description, created_at
+        INSERT OR IGNORE INTO collections (id, name, description) VALUES (?, ?, ?)
         """,
-        body.name,
-        body.description,
+        (collection_id, body.name, body.description),
     )
-    if row is None:
+    await db().commit()
+    if cursor.rowcount == 0:
         raise HTTPException(status_code=409, detail="Collection name already exists")
+    cursor = await db().execute(
+        "SELECT id, name, description, created_at FROM collections WHERE id = ?",
+        (collection_id,),
+    )
+    row = await cursor.fetchone()
     return Collection(**dict(row))
 
 
 @router.get("", response_model=list[Collection])
 async def list_collections(_: str = Depends(require_api_key)) -> list[Collection]:
-    rows = await pool().fetch(
+    cursor = await db().execute(
         "SELECT id, name, description, created_at FROM collections ORDER BY created_at"
     )
+    rows = await cursor.fetchall()
     return [Collection(**dict(r)) for r in rows]

@@ -5,16 +5,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import seed_dev_key
 from app.config import settings
-from app.db import close_pool, init_pool
+from app.db import close_db, init_db
 from app.routers import collections, documents, query
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await init_pool()
+    await init_db()
     await seed_dev_key(settings.api_dev_key)
     yield
-    await close_pool()
+    await close_db()
 
 
 app = FastAPI(

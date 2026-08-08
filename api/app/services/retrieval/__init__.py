@@ -1,35 +1,55 @@
-"""ハイブリッド検索（WS2が実装）。
+"""ハイブリッド検索。
 
-契約: docs/contracts.md 参照。
-PGroonga BM25 + pgvector cosine を各30件→RRF(k=60)融合→
+FTS5(trigram) BM25 + sqlite-vec cosine を各30件→RRF(k=60)融合→
 RERANKER_ENABLED時は bge-reranker-v2-m3 でリランク→top_k件。
 """
 
 import asyncio
+import re
 from uuid import UUID
 
 from google import genai
 from google.genai import types as genai_types
 
 from app.config import settings
-from app.db import pool
+from app.db import db, load_heading_path, serialize_vector
 from app.schemas import RetrievedChunk
 
 CANDIDATE_LIMIT = 30
 RRF_K = 60
 
+# 日本語の質問文をFTS5(trigram)のOR検索に分解するための区切り
+# （助詞・助動詞・句読点・記号で分割し、2文字以上の断片をキーワードとして使う）
+_SPLIT_PATTERN = re.compile(
+    r"[はがをにでとへもやの]|から|まで|より|など|について|ですか|ますか|でしょうか"
+    r"|です|ます|する|されて|して|といった"
+    r"|[\s、。・？！?!「」『』（）()\[\]{}:：;；,，.]+"
+)
+
 _gemini_client: genai.Client | None = None
 _reranker = None
 
 
-def reciprocal_rank_fusion(
-    ranked_id_lists: list[list[UUID]], k: int = RRF_K
-) -> dict[UUID, float]:
-    """RRF(k)融合: score = Σ 1/(k+rank)（rankは1始まり）。
+def build_fts_query(question: str) -> str:
+    """質問文をFTS5のOR検索クエリへ変換する純粋関数。
 
-    複数の順位リストを1つのスコアに統合する純粋関数。
+    trigramトークナイザは3文字以上の部分文字列一致で検索するため、
+    助詞等で分割した2文字以上の断片をダブルクォートで包みORで結合する。
     """
-    scores: dict[UUID, float] = {}
+    fragments = [f for f in _SPLIT_PATTERN.split(question) if f and len(f) >= 2]
+    seen: dict[str, None] = {}
+    for fragment in fragments:
+        seen.setdefault(fragment.replace('"', ""), None)
+    if not seen:
+        return f'"{question.replace(chr(34), "")}"'
+    return " OR ".join(f'"{fragment}"' for fragment in seen)
+
+
+def reciprocal_rank_fusion(
+    ranked_id_lists: list[list[str]], k: int = RRF_K
+) -> dict[str, float]:
+    """RRF(k)融合: score = Σ 1/(k+rank)（rankは1始まり）。"""
+    scores: dict[str, float] = {}
     for ranked_ids in ranked_id_lists:
         for rank, chunk_id in enumerate(ranked_ids, start=1):
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
@@ -64,56 +84,67 @@ async def _embed_question(question: str) -> list[float]:
     return normalize(response.embeddings[0].values)
 
 
-async def _bm25_candidate_ids(collection_id: UUID, question: str, limit: int) -> list[UUID]:
-    rows = await pool().fetch(
+async def _bm25_candidate_ids(collection_id: str, question: str, limit: int) -> list[str]:
+    """FTS5のbm25()昇順（小さいほど良い）で候補chunk_idを返す。"""
+    fts_query = build_fts_query(question)
+    cursor = await db().execute(
         """
-        SELECT id
-        FROM chunks
-        WHERE collection_id = $1 AND content &@~ $2
-        ORDER BY pgroonga_score(tableoid, ctid) DESC
-        LIMIT $3
+        SELECT f.chunk_id
+        FROM chunks_fts f
+        JOIN chunks c ON c.id = f.chunk_id
+        WHERE chunks_fts MATCH ? AND c.collection_id = ?
+        ORDER BY bm25(chunks_fts)
+        LIMIT ?
         """,
-        collection_id,
-        question,
-        limit,
+        (fts_query, collection_id, limit),
     )
-    return [row["id"] for row in rows]
+    return [row["chunk_id"] for row in await cursor.fetchall()]
 
 
-async def _vector_candidate_ids(collection_id: UUID, qvec: list[float], limit: int) -> list[UUID]:
-    rows = await pool().fetch(
+async def _vector_candidate_ids(collection_id: str, qvec: list[float], limit: int) -> list[str]:
+    """sqlite-vecのKNN。コレクション横断で多めに取り、collection_idで絞り込む。"""
+    cursor = await db().execute(
         """
-        SELECT id
-        FROM chunks
-        WHERE collection_id = $1
-        ORDER BY embedding <=> $2
-        LIMIT $3
+        SELECT v.chunk_id, v.distance
+        FROM chunk_vectors v
+        WHERE v.embedding MATCH ? AND k = ?
+        ORDER BY v.distance
         """,
-        collection_id,
-        qvec,
-        limit,
+        (serialize_vector(qvec), limit * 4),
     )
-    return [row["id"] for row in rows]
+    rows = await cursor.fetchall()
+    if not rows:
+        return []
+    candidate_ids = [row["chunk_id"] for row in rows]
+    placeholders = ",".join("?" for _ in candidate_ids)
+    cursor = await db().execute(
+        f"SELECT id FROM chunks WHERE id IN ({placeholders}) AND collection_id = ?",
+        (*candidate_ids, collection_id),
+    )
+    in_collection = {row["id"] for row in await cursor.fetchall()}
+    return [cid for cid in candidate_ids if cid in in_collection][:limit]
 
 
-async def _fetch_chunks_by_id(chunk_ids: list[UUID]) -> dict[UUID, RetrievedChunk]:
+async def _fetch_chunks_by_id(chunk_ids: list[str]) -> dict[str, RetrievedChunk]:
     if not chunk_ids:
         return {}
-    rows = await pool().fetch(
-        """
+    placeholders = ",".join("?" for _ in chunk_ids)
+    cursor = await db().execute(
+        f"""
         SELECT c.id AS chunk_id, c.document_id, d.filename, c.heading_path, c.content
         FROM chunks c
         JOIN documents d ON d.id = c.document_id
-        WHERE c.id = ANY($1::uuid[])
+        WHERE c.id IN ({placeholders})
         """,
         chunk_ids,
     )
+    rows = await cursor.fetchall()
     return {
         row["chunk_id"]: RetrievedChunk(
             chunk_id=row["chunk_id"],
             document_id=row["document_id"],
             filename=row["filename"],
-            heading_path=list(row["heading_path"]),
+            heading_path=load_heading_path(row["heading_path"]),
             content=row["content"],
             score=0.0,
         )
@@ -145,22 +176,21 @@ async def _rerank(
 
 async def search(collection_id: UUID, question: str, top_k: int = 8) -> list[RetrievedChunk]:
     qvec = await _embed_question(question)
-    bm25_ids, vector_ids = await asyncio.gather(
-        _bm25_candidate_ids(collection_id, question, CANDIDATE_LIMIT),
-        _vector_candidate_ids(collection_id, qvec, CANDIDATE_LIMIT),
-    )
+    cid = str(collection_id)
+    bm25_ids = await _bm25_candidate_ids(cid, question, CANDIDATE_LIMIT)
+    vector_ids = await _vector_candidate_ids(cid, qvec, CANDIDATE_LIMIT)
 
     fused_scores = reciprocal_rank_fusion([bm25_ids, vector_ids])
-    ordered_ids = sorted(fused_scores, key=lambda cid: fused_scores[cid], reverse=True)
+    ordered_ids = sorted(fused_scores, key=lambda chunk_id: fused_scores[chunk_id], reverse=True)
 
     fetch_count = CANDIDATE_LIMIT if settings.reranker_enabled else top_k
     candidate_ids = ordered_ids[:fetch_count]
 
     chunks_by_id = await _fetch_chunks_by_id(candidate_ids)
     ranked_chunks = [
-        chunks_by_id[cid].model_copy(update={"score": fused_scores[cid]})
-        for cid in candidate_ids
-        if cid in chunks_by_id
+        chunks_by_id[cid_].model_copy(update={"score": fused_scores[cid_]})
+        for cid_ in candidate_ids
+        if cid_ in chunks_by_id
     ]
 
     if settings.reranker_enabled and ranked_chunks:

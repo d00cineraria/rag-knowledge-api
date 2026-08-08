@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql://rag:rag_dev_password@localhost:5432/rag"
+    sqlite_path: str = "./data/rag.db"
     gemini_api_key: str = ""
     gemini_chat_model: str = "gemini-2.5-flash"
     gemini_embed_model: str = "gemini-embedding-001"
@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     api_dev_key: str = "dev-local-key"
     max_upload_mb: int = 20
     reranker_enabled: bool = False
-    data_dir: str = "/data"
+    data_dir: str = "./data"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

@@ -11,14 +11,18 @@
 | WS3 評価基盤 | `ws3-eval` | `eval/**`, `.github/workflows/eval.yml` |
 | WS4 UI | `ws4-ui` | `ui/**`（docker-compose.ymlへのuiサービス追加はマージ時にオーケストレーターが行う） |
 
-共有ファイル（routers/, schemas.py, db.py, config.py, docker-compose.yml, 001_schema.sql）は原則WS0のまま。変更が必要なら報告。
+共有ファイル（routers/, schemas.py, db.py, config.py, docker-compose.yml）は原則WS0のまま。変更が必要なら報告。
 
 ## DBスキーマ
 
-`db/init/001_schema.sql` が正本。要点:
-- `chunks.embedding` は **vector(768)**（Gemini `gemini-embedding-001` を output_dimensionality=768 で使用、**正規化してから格納**）
-- 日本語全文検索は PGroonga（`&@~` 演算子 + `pgroonga_score()`）
-- ベクトル検索は pgvector cosine（`<=>` 演算子）
+> [!note] 2026-08-08改定: PostgreSQL(pgvector+PGroonga)からSQLite(sqlite-vec+FTS5)へ移行
+> Postgres版の契約と実装はタグ `v0.1-postgres` を参照。
+
+`api/app/db.py` の `_SCHEMA` 群が正本。要点:
+- 単一ファイルSQLite（既定 `./data/rag.db`、WALモード）。id類はTEXT(UUID文字列)、heading_pathはJSON文字列
+- embeddingは `chunk_vectors`（sqlite-vec vec0仮想テーブル、**float[768]**。Gemini `gemini-embedding-001` を output_dimensionality=768、**L2正規化してから格納**）
+- 日本語全文検索は `chunks_fts`（FTS5 `tokenize='trigram'` + `bm25()`。質問文は `build_fts_query()` で助詞分解→OR結合）
+- chunks / chunks_fts / chunk_vectors の3テーブルは常に同期して書く（取り込み側の責務）
 
 ## サービス層インターフェース（api/app/services/）
 
@@ -33,7 +37,7 @@ async def process_document(document_id: UUID) -> None:
 
 # services/retrieval/__init__.py  (WS2が実装)
 async def search(collection_id: UUID, question: str, top_k: int = 8) -> list[RetrievedChunk]:
-    """PGroonga BM25 + pgvector cosine を各候補N=30件取得し RRF(k=60) で融合、
+    """FTS5(trigram) BM25 + sqlite-vec cosine を各候補N=30件取得し RRF(k=60) で融合、
     RERANKER_ENABLED時は bge-reranker-v2-m3 で上位をリランクして top_k 件返す。"""
 
 # services/generation/__init__.py  (WS2が実装)
