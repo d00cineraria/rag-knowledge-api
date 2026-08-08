@@ -40,6 +40,8 @@ class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=8, ge=1, le=20)
     stream: bool = True
+    # falseで回答生成をスキップし出典のみ返す（検索精度評価用。生成クォータを消費しない）
+    include_answer: bool = True
 
 
 class Source(BaseModel):

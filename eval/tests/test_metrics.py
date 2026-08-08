@@ -1,7 +1,6 @@
 """指標計算(eval/metrics.py)のユニットテスト。外部I/Oなし。"""
 
 import pytest
-
 from metrics import is_relevant, mean, mrr, ndcg_at_k, recall_at_k
 
 DOC = "employment_rules.md"

@@ -20,14 +20,22 @@ RelevantRef = dict[str, Any]
 
 
 def is_relevant(source: Source, ref: RelevantRef) -> bool:
-    """1件のsourceが1件のrelevant参照にマッチするかを判定する。"""
+    """1件のsourceが1件のrelevant参照にマッチするかを判定する。
+
+    filename一致かつ、refのheading_pathがsourceのheading_pathの
+    **連続部分列**として現れれば一致（チャンカーがH1タイトルを先頭に
+    含める/含めないの差異に頑健にするため、先頭固定の前方一致にしない）。
+    """
     if source.get("filename") != ref.get("filename"):
         return False
     ref_path = ref.get("heading_path", [])
     src_path = source.get("heading_path", [])
-    if len(ref_path) > len(src_path):
+    if not ref_path:
+        return True
+    m = len(ref_path)
+    if m > len(src_path):
         return False
-    return src_path[: len(ref_path)] == ref_path
+    return any(src_path[i : i + m] == ref_path for i in range(len(src_path) - m + 1))
 
 
 def relevance_labels(sources: list[Source], relevant: list[RelevantRef]) -> list[int]:

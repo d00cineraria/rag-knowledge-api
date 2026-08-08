@@ -34,8 +34,9 @@ async def query(body: QueryRequest, _: str = Depends(require_api_key)):
 
     if not body.stream:
         answer = ""
-        async for token in generation.stream_answer(body.question, chunks):
-            answer += token
+        if body.include_answer:
+            async for token in generation.stream_answer(body.question, chunks):
+                answer += token
         return QueryResponse(answer=answer, sources=sources)
 
     async def event_stream():
@@ -46,8 +47,9 @@ async def query(body: QueryRequest, _: str = Depends(require_api_key)):
             ),
         }
         t1 = time.monotonic()
-        async for token in generation.stream_answer(body.question, chunks):
-            yield {"event": "token", "data": json.dumps({"text": token}, ensure_ascii=False)}
+        if body.include_answer:
+            async for token in generation.stream_answer(body.question, chunks):
+                yield {"event": "token", "data": json.dumps({"text": token}, ensure_ascii=False)}
         yield {
             "event": "done",
             "data": json.dumps(

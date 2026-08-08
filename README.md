@@ -63,9 +63,21 @@ python eval/run_eval.py    --api-url http://localhost:8000 --api-key dev-local-k
 python eval/compare.py eval/results/<before>/report.json eval/results/<after>/report.json
 ```
 
-- **検索指標**: recall@3 / recall@8 / MRR / nDCG@8（filename + heading_path 前方一致で正解判定）
+- **検索指標**: recall@3 / recall@8 / MRR / nDCG@8（filename + heading_pathの連続部分列一致で正解判定）
 - **生成指標**: faithfulness / answer_relevancy（Gemini構造化出力によるLLM-as-judge）
+- `--retrieval-only` で生成APIを一切呼ばずに検索指標のみ計測可能（無料枠の日次クォータを消費しない）
 - GitHub Actions（workflow_dispatch）でスタック起動→評価→レポートartifact保存まで自動実行
+
+### ベースライン実測（2026-08-08, retrieval-only）
+
+| 指標 | 値 |
+|---|---|
+| recall@3 | 1.000 |
+| recall@8 | 1.000 |
+| MRR | 1.000 |
+| nDCG@8 | 1.000 |
+
+対象22問（+出典なし想定4問）。**注**: 現行コーパスは4文書のモック規程で見出し構造が明瞭なため天井に張り付いている（ハイブリッド検索の健全性確認としては有効だが、評価セットの識別力は不足）。次ステップとして、文書数を増やし、言い換え・複数文書横断・数値の紛らわしい問題を足して天井を剥がす予定。
 
 ## 設計上の主な判断
 

@@ -79,7 +79,7 @@ stream=false → JSON `{"answer": "...", "sources": [...]}`
 ```json
 {"id": "q001", "question": "...", "reference_answer": "...", "relevant": [{"filename": "doc.md", "heading_path": ["第2章"]}]}
 ```
-- 検索指標: recall@k (k=3,8), MRR, nDCG@8（relevantとchunkの突合はfilename+heading_path前方一致）
+- 検索指標: recall@k (k=3,8), MRR, nDCG@8（relevantとchunkの突合はfilename一致 + heading_pathの**連続部分列一致**。チャンカーはheading_path先頭にH1タイトルを含むため、先頭固定の前方一致は使わない — 2026-08-08統合時に改定）
 - 生成指標: faithfulness / answer_relevancy（LLM-as-judge、Gemini使用）
 - 実行: `python eval/run_eval.py --api-url http://localhost:8000 --api-key ...` → `eval/results/` にJSON+Markdownレポート
 - サンプル文書は**公開ライセンスのもののみ**（省庁ガイドライン等）。`eval/corpus/` に置き出典をREADMEに明記

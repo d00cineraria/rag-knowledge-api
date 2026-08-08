@@ -44,7 +44,7 @@ def load_golden(path: Path) -> list[dict[str, Any]]:
 
 
 async def evaluate_question(
-    item: dict[str, Any], *, query_fn: QueryFn, judge_fn: JudgeFnType, top_k: int
+    item: dict[str, Any], *, query_fn: QueryFn, judge_fn: JudgeFnType | None, top_k: int
 ) -> dict[str, Any]:
     response = await query_fn(item["question"], top_k)
     sources = response.get("sources", [])
@@ -60,17 +60,22 @@ async def evaluate_question(
             "ndcg@8": metrics.ndcg_at_k(sources, relevant, 8),
         }
 
-    judged = await judge_fn(item["question"], answer, sources, item.get("reference_answer", ""))
+    # judge_fn=None は検索指標のみ計測するモード（生成クォータを消費しない）
+    judged = None
+    if judge_fn is not None:
+        judged = await judge_fn(
+            item["question"], answer, sources, item.get("reference_answer", "")
+        )
 
     return {
         "id": item["id"],
         "question": item["question"],
         "answer": answer,
         "retrieval": retrieval,
-        "faithfulness": judged["faithfulness"].score,
-        "faithfulness_reason": judged["faithfulness"].reason,
-        "answer_relevancy": judged["answer_relevancy"].score,
-        "answer_relevancy_reason": judged["answer_relevancy"].reason,
+        "faithfulness": judged["faithfulness"].score if judged else None,
+        "faithfulness_reason": judged["faithfulness"].reason if judged else None,
+        "answer_relevancy": judged["answer_relevancy"].score if judged else None,
+        "answer_relevancy_reason": judged["answer_relevancy"].reason if judged else None,
     }
 
 
@@ -78,7 +83,7 @@ async def evaluate(
     golden: list[dict[str, Any]],
     *,
     query_fn: QueryFn,
-    judge_fn: JudgeFnType,
+    judge_fn: JudgeFnType | None,
     top_k: int,
     interval: float = 0.0,
 ) -> dict[str, Any]:
@@ -99,10 +104,15 @@ async def evaluate(
         "recall@8": metrics.mean([r["retrieval"]["recall@8"] for r in with_retrieval]),
         "mrr": metrics.mean([r["retrieval"]["mrr"] for r in with_retrieval]),
         "ndcg@8": metrics.mean([r["retrieval"]["ndcg@8"] for r in with_retrieval]),
-        "faithfulness": metrics.mean([float(r["faithfulness"]) for r in results]),
-        "answer_relevancy": metrics.mean([float(r["answer_relevancy"]) for r in results]),
+        "faithfulness": _mean_or_none([r["faithfulness"] for r in results]),
+        "answer_relevancy": _mean_or_none([r["answer_relevancy"] for r in results]),
     }
     return {"aggregate": aggregate, "questions": results}
+
+
+def _mean_or_none(values: list[Any]) -> float | None:
+    present = [float(v) for v in values if v is not None]
+    return metrics.mean(present) if present else None
 
 
 def render_markdown(report: dict[str, Any], *, top_k: int) -> str:
@@ -125,8 +135,16 @@ def render_markdown(report: dict[str, Any], *, top_k: int) -> str:
         f"| recall@8 | {agg['recall@8']:.3f} |",
         f"| MRR | {agg['mrr']:.3f} |",
         f"| nDCG@8 | {agg['ndcg@8']:.3f} |",
-        f"| faithfulness (1-5) | {agg['faithfulness']:.2f} |",
-        f"| answer_relevancy (1-5) | {agg['answer_relevancy']:.2f} |",
+        (
+            f"| faithfulness (1-5) | {agg['faithfulness']:.2f} |"
+            if agg["faithfulness"] is not None
+            else "| faithfulness (1-5) | -（retrieval-only実行） |"
+        ),
+        (
+            f"| answer_relevancy (1-5) | {agg['answer_relevancy']:.2f} |"
+            if agg["answer_relevancy"] is not None
+            else "| answer_relevancy (1-5) | -（retrieval-only実行） |"
+        ),
         "",
         "## 問題別内訳",
         "",
@@ -149,7 +167,8 @@ def render_markdown(report: dict[str, Any], *, top_k: int) -> str:
             f"| {fmt(ret['recall@8']) if ret else '-'} "
             f"| {fmt(ret['mrr']) if ret else '-'} "
             f"| {fmt(ret['ndcg@8']) if ret else '-'} "
-            f"| {r['faithfulness']} | {r['answer_relevancy']} |"
+            f"| {r['faithfulness'] if r['faithfulness'] is not None else '-'} "
+            f"| {r['answer_relevancy'] if r['answer_relevancy'] is not None else '-'} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -167,7 +186,9 @@ async def _with_retry(coro_factory, *, attempts: int = 5, base_delay: float = 15
             await asyncio.sleep(delay)
 
 
-def _real_query_fn(api_url: str, api_key: str, collection_id: str) -> QueryFn:
+def _real_query_fn(
+    api_url: str, api_key: str, collection_id: str, *, include_answer: bool = True
+) -> QueryFn:
     async def _post(question: str, top_k: int) -> dict[str, Any]:
         async with httpx.AsyncClient(base_url=api_url, timeout=60.0) as client:
             resp = await client.post(
@@ -178,6 +199,7 @@ def _real_query_fn(api_url: str, api_key: str, collection_id: str) -> QueryFn:
                     "question": question,
                     "top_k": top_k,
                     "stream": False,
+                    "include_answer": include_answer,
                 },
             )
             resp.raise_for_status()
@@ -220,6 +242,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help="問題間の待機秒数（Gemini無料枠のレート制限対策。例: 20）",
     )
+    parser.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        help="検索指標のみ計測（回答生成・LLM判定を行わず、生成の日次クォータを消費しない）",
+    )
     return parser.parse_args(argv)
 
 
@@ -228,15 +255,19 @@ def _timestamp() -> str:
 
 
 async def main_async(args: argparse.Namespace) -> Path:
-    gemini_key = args.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
-    if not gemini_key:
-        raise SystemExit(
-            "GEMINI_API_KEY が未設定です(--gemini-api-key または環境変数で指定してください)"
-        )
+    judge_fn = None
+    if not args.retrieval_only:
+        gemini_key = args.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
+        if not gemini_key:
+            raise SystemExit(
+                "GEMINI_API_KEY が未設定です(--gemini-api-key または環境変数で指定してください)"
+            )
+        judge_fn = _real_judge_fn(gemini_key, args.judge_model)
 
     golden = load_golden(Path(args.golden))
-    query_fn = _real_query_fn(args.api_url, args.api_key, args.collection_id)
-    judge_fn = _real_judge_fn(gemini_key, args.judge_model)
+    query_fn = _real_query_fn(
+        args.api_url, args.api_key, args.collection_id, include_answer=not args.retrieval_only
+    )
 
     report = await evaluate(
         golden, query_fn=query_fn, judge_fn=judge_fn, top_k=args.top_k, interval=args.interval
