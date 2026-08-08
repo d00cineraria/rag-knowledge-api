@@ -7,5 +7,5 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends "./groonga-apt-source-latest-$(lsb_release -cs).deb" && \
     rm "groonga-apt-source-latest-$(lsb_release -cs).deb" && \
     apt-get update && \
-    apt-get install -y --no-install-recommends postgresql-16-pgroonga && \
+    apt-get install -y --no-install-recommends postgresql-16-pgdg-pgroonga && \
     rm -rf /var/lib/apt/lists/*
