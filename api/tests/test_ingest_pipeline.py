@@ -1,7 +1,8 @@
 """取り込みパイプラインの統合テスト。
 
 一時ファイルの実SQLite（sqlite-vec + FTS5）に対して process_document を実行する。
-外部I/OはGemini embeddingのみモックする。
+外部I/OはembeddingプロバイダのみモックしてGeminiEmbeddingProvider/OllamaEmbeddingProviderは
+実際には呼ばない。
 """
 
 from uuid import uuid4
@@ -13,15 +14,18 @@ from app.config import settings
 from app.services import ingest
 
 
-class _FakeEmbedder:
+class _FakeEmbeddingProvider:
     def __init__(self, dim: int = 768, fail: bool = False):
         self.dim = dim
         self.fail = fail
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if self.fail:
             raise RuntimeError("embedding failed (mock)")
         return [[1.0 / self.dim] * self.dim for _ in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        raise NotImplementedError
 
 
 @pytest.fixture
@@ -63,7 +67,7 @@ async def _status(conn, document_id: str) -> tuple[str, str | None]:
 async def test_process_document_success_inserts_chunks_and_marks_ready(
     sqlite_db, monkeypatch
 ):
-    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(ingest, "get_embedding_provider", lambda: _FakeEmbeddingProvider())
     _, document_id = await _seed_document(
         sqlite_db, content="# タイトル\n\n## 第1章\n\n本文です。\n".encode()
     )
@@ -88,7 +92,7 @@ async def test_process_document_missing_row_is_noop(sqlite_db):
 
 
 async def test_process_document_unsupported_content_type_sets_error(sqlite_db, monkeypatch):
-    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(ingest, "get_embedding_provider", lambda: _FakeEmbeddingProvider())
     _, document_id = await _seed_document(
         sqlite_db, content=b"x", content_type="application/zip"
     )
@@ -100,7 +104,7 @@ async def test_process_document_unsupported_content_type_sets_error(sqlite_db, m
 
 
 async def test_process_document_empty_content_sets_error(sqlite_db, monkeypatch):
-    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(ingest, "get_embedding_provider", lambda: _FakeEmbeddingProvider())
     _, document_id = await _seed_document(sqlite_db, content=b"")
     with pytest.raises(ValueError):
         await ingest.process_document(document_id)
@@ -110,7 +114,7 @@ async def test_process_document_empty_content_sets_error(sqlite_db, monkeypatch)
 
 async def test_process_document_embedding_failure_sets_error(sqlite_db, monkeypatch):
     monkeypatch.setattr(
-        ingest, "GeminiEmbedder", lambda: _FakeEmbedder(fail=True)
+        ingest, "get_embedding_provider", lambda: _FakeEmbeddingProvider(fail=True)
     )
     _, document_id = await _seed_document(sqlite_db, content="# t\n\n本文\n".encode())
     with pytest.raises(RuntimeError):
@@ -121,13 +125,13 @@ async def test_process_document_embedding_failure_sets_error(sqlite_db, monkeypa
 
 
 async def test_process_document_worker_mode_stops_before_embedding(sqlite_db, monkeypatch):
-    """INGEST_MODE=workerではGeminiEmbedderを呼ばず、chunks/chunks_ftsだけ書いて
+    """INGEST_MODE=workerではembeddingプロバイダを呼ばず、chunks/chunks_ftsだけ書いて
     status='embedding'で止まる（chunk_vectorsは空のまま）。"""
 
     def _fail_if_constructed():
-        raise AssertionError("worker mode must not construct GeminiEmbedder")
+        raise AssertionError("worker mode must not construct an embedding provider")
 
-    monkeypatch.setattr(ingest, "GeminiEmbedder", lambda: _fail_if_constructed())
+    monkeypatch.setattr(ingest, "get_embedding_provider", lambda: _fail_if_constructed())
     monkeypatch.setattr(settings, "ingest_mode", "worker")
 
     _, document_id = await _seed_document(
@@ -155,7 +159,7 @@ async def test_process_document_inline_mode_unaffected_by_worker_mode_default(
 ):
     """settings.ingest_modeの既定値'inline'では従来通りembeddingまで完結する。"""
     assert settings.ingest_mode == "inline"
-    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(ingest, "get_embedding_provider", lambda: _FakeEmbeddingProvider())
     _, document_id = await _seed_document(
         sqlite_db, content="# タイトル\n\n## 第1章\n\n本文です。\n".encode()
     )
@@ -169,7 +173,7 @@ async def test_process_document_inline_mode_unaffected_by_worker_mode_default(
 
 
 async def test_reingest_replaces_existing_chunks(sqlite_db, monkeypatch):
-    monkeypatch.setattr(ingest, "GeminiEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(ingest, "get_embedding_provider", lambda: _FakeEmbeddingProvider())
     _, document_id = await _seed_document(
         sqlite_db, content="# t\n\n## A\n\n本文A\n".encode()
     )

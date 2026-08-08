@@ -1,13 +1,14 @@
 """RAG評価ランナー。
 
 `/v1/query` (stream=false) を呼び出し、検索指標(recall@3, recall@8, MRR, nDCG@8)と
-生成指標(faithfulness, answer_relevancy — Geminiによる LLM-as-judge)を算出して
+生成指標(faithfulness, answer_relevancy — LLM-as-judge。既定はOllama、
+LLM_PROVIDER=geminiでGeminiに切替)を算出して
 `eval/results/{timestamp}/report.json` + `report.md` に出力する。
 
 契約: docs/contracts.md「評価データ形式」節。
 
 `evaluate()` / `evaluate_question()` は query_fn / judge_fn を注入して呼べるため、
-実APIやGeminiへのネットワークI/Oなしにユニットテストできる
+実APIやLLMへのネットワークI/Oなしにユニットテストできる
 (eval/tests/test_run_eval.py 参照)。
 """
 
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+import llm_judge
 import metrics
 from llm_judge import JudgeScore, judge_answer
 
@@ -257,11 +260,13 @@ def _timestamp() -> str:
 async def main_async(args: argparse.Namespace) -> Path:
     judge_fn = None
     if not args.retrieval_only:
-        gemini_key = args.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
-        if not gemini_key:
-            raise SystemExit(
-                "GEMINI_API_KEY が未設定です(--gemini-api-key または環境変数で指定してください)"
-            )
+        gemini_key = ""
+        if llm_judge._provider() == "gemini":
+            gemini_key = args.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
+            if not gemini_key:
+                raise SystemExit(
+                    "GEMINI_API_KEY が未設定です(--gemini-api-key または環境変数で指定してください)"
+                )
         judge_fn = _real_judge_fn(gemini_key, args.judge_model)
 
     golden = load_golden(Path(args.golden))

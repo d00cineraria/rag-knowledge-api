@@ -1,6 +1,9 @@
-"""回答生成のユニットテスト。DB・Geminiは全てモック。"""
+"""回答生成のユニットテスト。DB・Gemini・Ollamaは全てモック。"""
 
+import json
 from uuid import uuid4
+
+import httpx
 
 from app.schemas import RetrievedChunk
 from app.services import generation
@@ -82,6 +85,7 @@ def _install_fake_gemini(monkeypatch, texts, captured=None):
 
 
 async def test_stream_answer_yields_tokens_from_gemini_stream(monkeypatch):
+    monkeypatch.setattr(generation.settings, "llm_provider", "gemini")
     captured = {}
     _install_fake_gemini(monkeypatch, ["回答", "の断片"], captured)
 
@@ -93,7 +97,56 @@ async def test_stream_answer_yields_tokens_from_gemini_stream(monkeypatch):
 
 
 async def test_stream_answer_skips_empty_text_chunks(monkeypatch):
+    monkeypatch.setattr(generation.settings, "llm_provider", "gemini")
     _install_fake_gemini(monkeypatch, ["a", None, "", "b"])
+
+    tokens = [t async for t in generation.stream_answer("質問", [_chunk()])]
+
+    assert tokens == ["a", "b"]
+
+
+def _ndjson_response(lines: list[dict]) -> httpx.Response:
+    body = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n"
+    return httpx.Response(200, content=body.encode())
+
+
+async def test_stream_answer_yields_tokens_from_ollama_ndjson_stream(monkeypatch):
+    monkeypatch.setattr(generation.settings, "llm_provider", "ollama")
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _ndjson_response(
+            [
+                {"message": {"content": "回答"}, "done": False},
+                {"message": {"content": "の断片"}, "done": False},
+                {"message": {"content": ""}, "done": True},
+            ]
+        )
+
+    monkeypatch.setattr(generation, "_ollama_transport", httpx.MockTransport(handler))
+
+    tokens = [t async for t in generation.stream_answer("質問", [_chunk()])]
+
+    assert tokens == ["回答", "の断片"]
+    assert captured["body"]["model"] == generation.settings.ollama_chat_model
+    assert captured["body"]["stream"] is True
+    assert "質問" in captured["body"]["messages"][0]["content"]
+
+
+async def test_stream_answer_stops_at_ollama_done_line(monkeypatch):
+    monkeypatch.setattr(generation.settings, "llm_provider", "ollama")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ndjson_response(
+            [
+                {"message": {"content": "a"}, "done": False},
+                {"message": {"content": "b"}, "done": True},
+                {"message": {"content": "should-not-appear"}, "done": False},
+            ]
+        )
+
+    monkeypatch.setattr(generation, "_ollama_transport", httpx.MockTransport(handler))
 
     tokens = [t async for t in generation.stream_answer("質問", [_chunk()])]
 

@@ -1,16 +1,19 @@
 """LLM-as-judgeによる生成品質評価(faithfulness / answer_relevancy)。
 
-Gemini(`gemini-2.5-flash`)に構造化出力で1〜5点のスコアを返させる。
-実際のAPI呼び出しは `call_gemini_judge` 1箇所に閉じ込めてあり、
+`LLM_PROVIDER`環境変数(既定"ollama")でGemini/Ollamaを切り替える。
+Gemini(`gemini-2.5-flash`)には構造化出力(response_schema)で、Ollamaには
+`/api/chat`の`format`パラメータにJSON Schemaを渡して1〜5点のスコアを返させる。
+実際のAPI呼び出しは `call_gemini_judge` / `call_ollama_judge` に閉じ込めてあり、
 run_eval.py はテスト時にこれを差し替え可能な非同期コールバック(judge_fn)
-として注入する(eval/tests/test_run_eval.py 参照)。google-genai の
-importはこの関数内でのみ行うため、プロンプト生成のユニットテストは
-google-genaiがインストールされていなくても実行できる。
+として注入する(eval/tests/test_run_eval.py 参照)。google-genai/httpxの
+importは各関数内でのみ行うため、プロンプト生成のユニットテストはこれらが
+インストールされていなくても実行できる。
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -19,6 +22,33 @@ from pydantic import BaseModel, Field
 class JudgeScore(BaseModel):
     score: int = Field(ge=1, le=5)
     reason: str
+
+
+_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "reason": {"type": "string"},
+    },
+    "required": ["score", "reason"],
+}
+
+# テスト用のhttpx.MockTransport差し替え口（Noneなら実ネットワークに接続する）
+_ollama_transport = None
+
+
+def _provider() -> str:
+    return os.environ.get("LLM_PROVIDER", "ollama")
+
+
+def _ollama_base_url() -> str:
+    return os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+
+def _ollama_judge_model() -> str:
+    return os.environ.get("OLLAMA_JUDGE_MODEL") or os.environ.get(
+        "OLLAMA_CHAT_MODEL", "qwen3.5:9b"
+    )
 
 
 def build_faithfulness_prompt(
@@ -102,6 +132,39 @@ async def call_gemini_judge(
     return JudgeScore(**data)
 
 
+async def call_ollama_judge(
+    prompt: str, *, base_url: str | None = None, model: str | None = None
+) -> JudgeScore:
+    """Ollamaに構造化出力(`format`パラメータにJSON Schema)でスコアを問い合わせる。
+
+    実ネットワークI/Oあり。パースに失敗した場合は1回だけリトライし、
+    それでも失敗すれば例外を送出する(黙ってダミー値を返さない)。
+    """
+    import httpx
+
+    async with httpx.AsyncClient(
+        base_url=base_url or _ollama_base_url(), timeout=120.0, transport=_ollama_transport
+    ) as client:
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            response = await client.post(
+                "/api/chat",
+                json={
+                    "model": model or _ollama_judge_model(),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "format": _JUDGE_SCHEMA,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            content = response.json()["message"]["content"]
+            try:
+                return JudgeScore(**json.loads(content))
+            except (json.JSONDecodeError, ValueError) as exc:
+                last_error = exc
+        raise RuntimeError(f"Ollama judge returned unparseable output: {last_error}")
+
+
 async def judge_answer(
     question: str,
     answer: str,
@@ -111,12 +174,13 @@ async def judge_answer(
     api_key: str,
     model: str = "gemini-2.5-flash",
 ) -> dict[str, JudgeScore]:
-    faithfulness = await call_gemini_judge(
-        build_faithfulness_prompt(question, answer, sources), api_key=api_key, model=model
-    )
-    answer_relevancy = await call_gemini_judge(
-        build_answer_relevancy_prompt(question, answer, reference_answer),
-        api_key=api_key,
-        model=model,
+    async def _judge(prompt: str) -> JudgeScore:
+        if _provider() == "ollama":
+            return await call_ollama_judge(prompt)
+        return await call_gemini_judge(prompt, api_key=api_key, model=model)
+
+    faithfulness = await _judge(build_faithfulness_prompt(question, answer, sources))
+    answer_relevancy = await _judge(
+        build_answer_relevancy_prompt(question, answer, reference_answer)
     )
     return {"faithfulness": faithfulness, "answer_relevancy": answer_relevancy}

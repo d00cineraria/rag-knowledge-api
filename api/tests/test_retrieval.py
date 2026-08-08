@@ -1,4 +1,4 @@
-"""検索パイプラインのユニットテスト。DB・Gemini・CrossEncoderは全てモック。"""
+"""検索パイプラインのユニットテスト。DB・embeddingプロバイダ・CrossEncoderは全てモック。"""
 
 from uuid import uuid4
 
@@ -26,15 +26,6 @@ def test_reciprocal_rank_fusion_ranks_items_in_both_lists_higher():
 
 def test_reciprocal_rank_fusion_empty_lists_returns_empty():
     assert retrieval.reciprocal_rank_fusion([[], []]) == {}
-
-
-def test_normalize_scales_to_unit_length():
-    vec = retrieval.normalize([3.0, 4.0])
-    assert vec == pytest.approx([0.6, 0.8])
-
-
-def test_normalize_zero_vector_is_unchanged():
-    assert retrieval.normalize([0.0, 0.0]) == [0.0, 0.0]
 
 
 @pytest.fixture(autouse=True)

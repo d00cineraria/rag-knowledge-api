@@ -1,11 +1,14 @@
 """回答生成（WS2が実装）。
 
 契約: docs/contracts.md 参照。
-Geminiで出典引用付き回答をトークン単位でyield。出典は[1][2]形式。
+settings.llm_provider に応じてGemini/Ollamaへ委譲する。プロンプト組み立て(build_prompt)は共通。
+出典引用付き回答をトークン単位でyield。出典は[1][2]形式。
 """
 
+import json
 from collections.abc import AsyncIterator
 
+import httpx
 from google import genai
 
 from app.config import settings
@@ -17,6 +20,8 @@ INSTRUCTION = (
 )
 
 _gemini_client: genai.Client | None = None
+# テスト用のhttpx.MockTransport差し替え口（Noneなら実ネットワークに接続する）
+_ollama_transport: httpx.BaseTransport | None = None
 
 
 def _format_source(index: int, chunk: RetrievedChunk) -> str:
@@ -40,6 +45,15 @@ def _get_gemini_client() -> genai.Client:
 
 async def stream_answer(question: str, chunks: list[RetrievedChunk]) -> AsyncIterator[str]:
     prompt = build_prompt(question, chunks)
+    if settings.llm_provider == "gemini":
+        async for token in _stream_gemini(prompt):
+            yield token
+        return
+    async for token in _stream_ollama(prompt):
+        yield token
+
+
+async def _stream_gemini(prompt: str) -> AsyncIterator[str]:
     client = _get_gemini_client()
     stream = await client.aio.models.generate_content_stream(
         model=settings.gemini_chat_model,
@@ -48,3 +62,29 @@ async def stream_answer(question: str, chunks: list[RetrievedChunk]) -> AsyncIte
     async for response in stream:
         if response.text:
             yield response.text
+
+
+async def _stream_ollama(prompt: str) -> AsyncIterator[str]:
+    """/api/chat (stream=true) のNDJSONを1行ずつパースし、message.contentをyieldする。"""
+    async with httpx.AsyncClient(
+        base_url=settings.ollama_base_url, timeout=None, transport=_ollama_transport
+    ) as client:
+        async with client.stream(
+            "POST",
+            "/api/chat",
+            json={
+                "model": settings.ollama_chat_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                content = data.get("message", {}).get("content")
+                if content:
+                    yield content
+                if data.get("done"):
+                    break

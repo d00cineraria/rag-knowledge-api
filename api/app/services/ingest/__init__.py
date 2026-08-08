@@ -1,8 +1,8 @@
 """取り込みパイプライン。
 
 ./data/raw/{document_id} のファイルをパース→見出し考慮チャンキング→
-Gemini embedding（768次元・正規化）→ chunks / chunks_fts / chunk_vectors へ
-INSERT → documents.status を更新する。
+embedding（768次元・正規化、Gemini/OllamaはEMBEDDING_PROVIDERで切替）→
+chunks / chunks_fts / chunk_vectors へ INSERT → documents.status を更新する。
 """
 
 import logging
@@ -11,9 +11,9 @@ from uuid import UUID, uuid4
 
 from app.config import settings
 from app.db import db, dump_heading_path, serialize_vector
+from app.services.embedding import get_embedding_provider
 
 from .chunking import Chunk, chunk_markdown, chunk_pdf_pages
-from .embedding import GeminiEmbedder
 from .parsing import extract_pdf_pages
 
 logger = logging.getLogger(__name__)
@@ -64,8 +64,8 @@ async def process_document(document_id: UUID) -> None:
 
         vectors: list[list[float]] | None = None
         if not is_worker_mode:
-            embedder = GeminiEmbedder()
-            vectors = await embedder.embed([c.content for c in chunks])
+            provider = get_embedding_provider()
+            vectors = await provider.embed_documents([c.content for c in chunks])
 
         # 再取り込みに備えて既存チャンクを全消去してから書き直す
         cursor = await conn.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_id,))

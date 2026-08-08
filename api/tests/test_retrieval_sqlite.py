@@ -1,6 +1,6 @@
 """実SQLite（sqlite-vec + FTS5 trigram）に対するハイブリッド検索の統合テスト。
 
-外部I/OはGemini embedding（質問ベクトル化）のみモックする。
+外部I/Oはembeddingプロバイダ（質問ベクトル化）のみモックする。
 """
 
 from uuid import uuid4

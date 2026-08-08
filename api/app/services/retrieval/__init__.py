@@ -8,12 +8,10 @@ import asyncio
 import re
 from uuid import UUID
 
-from google import genai
-from google.genai import types as genai_types
-
 from app.config import settings
 from app.db import db, load_heading_path, serialize_vector
 from app.schemas import RetrievedChunk
+from app.services.embedding import get_embedding_provider
 
 CANDIDATE_LIMIT = 30
 RRF_K = 60
@@ -26,7 +24,6 @@ _SPLIT_PATTERN = re.compile(
     r"|[\s、。・？！?!「」『』（）()\[\]{}:：;；,，.]+"
 )
 
-_gemini_client: genai.Client | None = None
 _reranker = None
 
 
@@ -56,32 +53,9 @@ def reciprocal_rank_fusion(
     return scores
 
 
-def normalize(vector: list[float]) -> list[float]:
-    """L2正規化。ingestと同条件でGemini embeddingを正規化する。"""
-    norm = sum(v * v for v in vector) ** 0.5
-    if norm == 0.0:
-        return vector
-    return [v / norm for v in vector]
-
-
-def _get_gemini_client() -> genai.Client:
-    global _gemini_client
-    if _gemini_client is None:
-        _gemini_client = genai.Client(api_key=settings.gemini_api_key)
-    return _gemini_client
-
-
 async def _embed_question(question: str) -> list[float]:
-    client = _get_gemini_client()
-    response = await client.aio.models.embed_content(
-        model=settings.gemini_embed_model,
-        contents=question,
-        config=genai_types.EmbedContentConfig(
-            task_type="RETRIEVAL_QUERY",
-            output_dimensionality=settings.embed_dim,
-        ),
-    )
-    return normalize(response.embeddings[0].values)
+    """settings.llm_provider に応じたembeddingプロバイダで質問を埋め込む(正規化込み)。"""
+    return await get_embedding_provider().embed_query(question)
 
 
 async def _bm25_candidate_ids(collection_id: str, question: str, limit: int) -> list[str]:
