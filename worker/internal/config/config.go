@@ -11,13 +11,17 @@ import (
 // Config はワーカー起動に必要な設定値。
 type Config struct {
 	SQLitePath       string
+	LLMProvider      string // "ollama" | "gemini"
 	GeminiAPIKey     string
 	GeminiEmbedModel string
+	OllamaBaseURL    string
+	OllamaEmbedModel string
 	EmbedDim         int
 	PollInterval     time.Duration
 }
 
-// Load は環境変数からConfigを組み立てる。GEMINI_API_KEYが空だとエラーを返す。
+// Load は環境変数からConfigを組み立てる。
+// LLM_PROVIDER=gemini（既定はollama）のときのみGEMINI_API_KEYが空だとエラーを返す。
 func Load() (Config, error) {
 	embedDim, err := envInt("EMBED_DIM", 768)
 	if err != nil {
@@ -31,14 +35,17 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		SQLitePath:       envString("SQLITE_PATH", "./data/rag.db"),
+		LLMProvider:      envString("LLM_PROVIDER", "ollama"),
 		GeminiAPIKey:     os.Getenv("GEMINI_API_KEY"),
 		GeminiEmbedModel: envString("GEMINI_EMBED_MODEL", "gemini-embedding-001"),
+		OllamaBaseURL:    envString("OLLAMA_BASE_URL", "http://localhost:11434"),
+		OllamaEmbedModel: envString("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
 		EmbedDim:         embedDim,
 		PollInterval:     time.Duration(pollSeconds) * time.Second,
 	}
 
-	if cfg.GeminiAPIKey == "" {
-		return Config{}, fmt.Errorf("config: GEMINI_API_KEY is required")
+	if cfg.LLMProvider == "gemini" && cfg.GeminiAPIKey == "" {
+		return Config{}, fmt.Errorf("config: GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
 	}
 
 	return cfg, nil

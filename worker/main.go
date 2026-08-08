@@ -31,7 +31,16 @@ func main() {
 	}
 	defer st.Close()
 
-	embedder := embedding.NewClient(cfg.GeminiAPIKey, cfg.GeminiEmbedModel, cfg.EmbedDim)
+	var embedder worker.Embedder
+	var embedModel string
+	switch cfg.LLMProvider {
+	case "gemini":
+		embedder = embedding.NewClient(cfg.GeminiAPIKey, cfg.GeminiEmbedModel, cfg.EmbedDim)
+		embedModel = cfg.GeminiEmbedModel
+	default: // "ollama"
+		embedder = embedding.NewOllamaClient(cfg.OllamaBaseURL, cfg.OllamaEmbedModel)
+		embedModel = cfg.OllamaEmbedModel
+	}
 	w := worker.New(st, embedder, cfg.PollInterval, logger)
 
 	// SIGINT/SIGTERMを受けたらctxを閉じ、ポーリングループを止める（graceful shutdown）。
@@ -39,8 +48,8 @@ func main() {
 	defer stop()
 
 	logger.Printf(
-		"worker: starting (db=%s, model=%s, dim=%d, poll=%s)",
-		cfg.SQLitePath, cfg.GeminiEmbedModel, cfg.EmbedDim, cfg.PollInterval,
+		"worker: starting (db=%s, provider=%s, model=%s, dim=%d, poll=%s)",
+		cfg.SQLitePath, cfg.LLMProvider, embedModel, cfg.EmbedDim, cfg.PollInterval,
 	)
 	w.Run(ctx)
 	logger.Println("worker: stopped")
