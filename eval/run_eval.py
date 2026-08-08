@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
 import metrics
 from llm_judge import JudgeScore, judge_answer
 
@@ -76,12 +75,20 @@ async def evaluate_question(
 
 
 async def evaluate(
-    golden: list[dict[str, Any]], *, query_fn: QueryFn, judge_fn: JudgeFnType, top_k: int
+    golden: list[dict[str, Any]],
+    *,
+    query_fn: QueryFn,
+    judge_fn: JudgeFnType,
+    top_k: int,
+    interval: float = 0.0,
 ) -> dict[str, Any]:
-    results = [
-        await evaluate_question(item, query_fn=query_fn, judge_fn=judge_fn, top_k=top_k)
-        for item in golden
-    ]
+    results = []
+    for i, item in enumerate(golden):
+        if interval > 0 and i > 0:
+            await asyncio.sleep(interval)
+        results.append(
+            await evaluate_question(item, query_fn=query_fn, judge_fn=judge_fn, top_k=top_k)
+        )
 
     with_retrieval = [r for r in results if r["retrieval"] is not None]
     aggregate = {
@@ -103,9 +110,11 @@ def render_markdown(report: dict[str, Any], *, top_k: int) -> str:
     lines = [
         "# RAG評価レポート",
         "",
-        f"- 対象問題数: {agg['num_questions']}"
-        f"（検索指標対象: {agg['num_retrieval_questions']}、"
-        f"出典なし想定: {agg['num_out_of_scope_questions']}）",
+        (
+            f"- 対象問題数: {agg['num_questions']}"
+            f"（検索指標対象: {agg['num_retrieval_questions']}、"
+            f"出典なし想定: {agg['num_out_of_scope_questions']}）"
+        ),
         f"- top_k: {top_k}",
         "",
         "## 指標サマリ",
@@ -121,8 +130,10 @@ def render_markdown(report: dict[str, Any], *, top_k: int) -> str:
         "",
         "## 問題別内訳",
         "",
-        "| id | question | recall@3 | recall@8 | MRR | nDCG@8 | faithfulness | "
-        "answer_relevancy |",
+        (
+            "| id | question | recall@3 | recall@8 | MRR | nDCG@8 | faithfulness | "
+            "answer_relevancy |"
+        ),
         "|---|---|---|---|---|---|---|---|",
     ]
 
@@ -143,8 +154,21 @@ def render_markdown(report: dict[str, Any], *, top_k: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+async def _with_retry(coro_factory, *, attempts: int = 5, base_delay: float = 15.0):
+    """Gemini無料枠のレート制限(429起因の失敗)を線形バックオフで吸収する。"""
+    for attempt in range(attempts):
+        try:
+            return await coro_factory()
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            delay = base_delay * (attempt + 1)
+            print(f"  retry {attempt + 1}/{attempts - 1} after {delay:.0f}s (rate limit?)")
+            await asyncio.sleep(delay)
+
+
 def _real_query_fn(api_url: str, api_key: str, collection_id: str) -> QueryFn:
-    async def query_fn(question: str, top_k: int) -> dict[str, Any]:
+    async def _post(question: str, top_k: int) -> dict[str, Any]:
         async with httpx.AsyncClient(base_url=api_url, timeout=60.0) as client:
             resp = await client.post(
                 "/v1/query",
@@ -159,6 +183,9 @@ def _real_query_fn(api_url: str, api_key: str, collection_id: str) -> QueryFn:
             resp.raise_for_status()
             return resp.json()
 
+    async def query_fn(question: str, top_k: int) -> dict[str, Any]:
+        return await _with_retry(lambda: _post(question, top_k))
+
     return query_fn
 
 
@@ -166,8 +193,10 @@ def _real_judge_fn(gemini_api_key: str, model: str) -> JudgeFnType:
     async def judge_fn(
         question: str, answer: str, sources: list[dict[str, Any]], reference_answer: str
     ) -> dict[str, JudgeScore]:
-        return await judge_answer(
-            question, answer, sources, reference_answer, api_key=gemini_api_key, model=model
+        return await _with_retry(
+            lambda: judge_answer(
+                question, answer, sources, reference_answer, api_key=gemini_api_key, model=model
+            )
         )
 
     return judge_fn
@@ -185,6 +214,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gemini-api-key", default=None, help="未指定の場合は環境変数GEMINI_API_KEYを使用"
     )
     parser.add_argument("--judge-model", default="gemini-2.5-flash")
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.0,
+        help="問題間の待機秒数（Gemini無料枠のレート制限対策。例: 20）",
+    )
     return parser.parse_args(argv)
 
 
@@ -203,7 +238,9 @@ async def main_async(args: argparse.Namespace) -> Path:
     query_fn = _real_query_fn(args.api_url, args.api_key, args.collection_id)
     judge_fn = _real_judge_fn(gemini_key, args.judge_model)
 
-    report = await evaluate(golden, query_fn=query_fn, judge_fn=judge_fn, top_k=args.top_k)
+    report = await evaluate(
+        golden, query_fn=query_fn, judge_fn=judge_fn, top_k=args.top_k, interval=args.interval
+    )
 
     out_dir = Path(args.out_dir) / _timestamp()
     out_dir.mkdir(parents=True, exist_ok=True)
