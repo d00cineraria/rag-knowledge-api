@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
 import llm_judge
 import metrics
 from llm_judge import JudgeScore, judge_answer
@@ -190,10 +189,18 @@ async def _with_retry(coro_factory, *, attempts: int = 5, base_delay: float = 15
 
 
 def _real_query_fn(
-    api_url: str, api_key: str, collection_id: str, *, include_answer: bool = True
+    api_url: str,
+    api_key: str,
+    collection_id: str,
+    *,
+    include_answer: bool = True,
+    timeout: float = 300.0,
 ) -> QueryFn:
+    """timeout既定300秒: Ollamaの推論モデル(qwen3.5:9b等)は出典付き生成に
+    60秒を超えることがあり、短いタイムアウトだとリトライしても常に失敗する。"""
+
     async def _post(question: str, top_k: int) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=api_url, timeout=60.0) as client:
+        async with httpx.AsyncClient(base_url=api_url, timeout=timeout) as client:
             resp = await client.post(
                 "/v1/query",
                 headers={"Authorization": f"Bearer {api_key}"},

@@ -6,9 +6,8 @@ Gemini/Ollamaへの実ネットワーク呼び出しはせず、httpxはMockTran
 import json
 
 import httpx
-import pytest
-
 import llm_judge
+import pytest
 from llm_judge import (
     JudgeScore,
     build_answer_relevancy_prompt,
