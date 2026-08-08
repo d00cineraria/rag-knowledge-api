@@ -148,14 +148,14 @@ python eval/compare.py eval/results/<before>/report.json eval/results/<after>/re
 
 Phase 4でOllamaを既定プロバイダにしたため、同一golden・同一チャンクで埋め込みモデルの違いによる検索精度差を実測した:
 
-| 指標 | Ollama (nomic-embed-text, ゼロ円) | Gemini (gemini-embedding-001) |
-|---|---|---|
-| recall@3 | 0.824 | 0.946 |
-| recall@8 | 0.878 | 1.000 |
-| MRR | 0.712 | 0.865 |
-| nDCG@8 | 0.746 | 0.887 |
+| 指標 | Ollama, リランカーOFF | Gemini, リランカーOFF | Ollama, **リランカーON** |
+|---|---|---|---|
+| recall@3 | 0.824 | 0.946 | **0.973** |
+| recall@8 | 0.878 | 1.000 | 0.973 |
+| MRR | 0.712 | 0.865 | **0.892** |
+| nDCG@8 | 0.746 | 0.887 | **0.910** |
 
-この難化させた44問（Phase 2で追加した紛らわしい旧版・類似規程を含む）では、Gemini embeddingが全指標でOllama(nomic-embed-text)を上回る。**ゼロ円・オフライン**という運用面の利点と引き換えに、識別が難しいコーパスでは検索精度が明確に低下するというトレードオフを数値で確認した。用途に応じて`LLM_PROVIDER`で切替可能（リランカー併用でOllama側の順位付けを補う運用も選択肢）。
+この難化させた44問（Phase 2で追加した紛らわしい旧版・類似規程を含む）では、単体だとGemini embeddingが全指標でOllama(nomic-embed-text)を上回る。**しかしbge-reranker-v2-m3（CPU・無料）を有効にするだけで、Ollama側はrecall@3・MRR・nDCG@8でGemini単体を逆転する**（recall@8のみGeminiの1.000にわずかに届かない）。つまり「ローカル埋め込みの精度不足」は「無料のリランカー1枚」でほぼ解消でき、**ゼロ円のまま実用精度に到達する**という結論が数値で得られた。`LLM_PROVIDER=ollama` かつ `RERANKER_ENABLED=true` を既定の推奨構成とする。
 
 ## 設計上の主な判断
 
