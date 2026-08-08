@@ -20,9 +20,20 @@
 
 `api/app/db.py` の `_SCHEMA` 群が正本。要点:
 - 単一ファイルSQLite（既定 `./data/rag.db`、WALモード）。id類はTEXT(UUID文字列)、heading_pathはJSON文字列
-- embeddingは `chunk_vectors`（sqlite-vec vec0仮想テーブル、**float[768]**。Gemini `gemini-embedding-001` を output_dimensionality=768、**L2正規化してから格納**）
+- embeddingは `chunk_vectors`（sqlite-vec vec0仮想テーブル、**float[768]**。**L2正規化してから格納**。Ollama `nomic-embed-text` / Gemini `gemini-embedding-001`(output_dimensionality=768) いずれも768次元で揃えてあるため`EMBED_DIM`は共通）
 - 日本語全文検索は `chunks_fts`（FTS5 `tokenize='trigram'` + `bm25()`。質問文は `build_fts_query()` で助詞分解→OR結合）
 - chunks / chunks_fts / chunk_vectors の3テーブルは常に同期して書く（取り込み側の責務）
+
+## LLMプロバイダ抽象化
+
+> [!note] 2026-08-09追加: Gemini/Ollamaの切替に対応（既定 `LLM_PROVIDER=ollama`）
+> ゼロ円・APIキー不要のローカル完結をデフォルト体験にする方針。Geminiは`LLM_PROVIDER=gemini`で選択可能な代替経路として維持。
+
+- **embedding**: `api/app/services/embedding/__init__.py` の `get_embedding_provider()` が `settings.llm_provider` に応じて `GeminiEmbeddingProvider` / `OllamaEmbeddingProvider` を返す。両者とも `embed_documents(texts) -> list[list[float]]` / `embed_query(text) -> list[float]` を実装し、ingest（`process_document`）とretrieval（`_embed_question`）の双方から共通で呼ばれる
+  - Ollama側は`nomic-embed-text`の非対称検索規約に従い、テキストへ`"search_document: "` / `"search_query: "`を前置してから`/api/embed`へ送る（APIパラメータではなくテキスト前置である点に注意）
+  - Go取り込みワーカー（`worker/`）も同一の考え方で `Embedder` インターフェース（`Embed(ctx, texts) ([][]float32, error)`）にOllama実装（`embedding.NewOllamaClient`）を追加済み。`LLM_PROVIDER=gemini`時のみ`GEMINI_API_KEY`必須（`worker/internal/config`）
+- **回答生成**: `api/app/services/generation/__init__.py` の `stream_answer` が内部で分岐。Ollama経路は `/api/chat`（`stream:true`）のNDJSONを1行ずつパース
+- **LLM-as-judge**: `eval/llm_judge.py` の `judge_answer` が内部で分岐。Ollama経路は `/api/chat` の `format` パラメータにJSON Schemaを渡して構造化出力を得る（パース失敗時は1回リトライ、それでも失敗なら例外）
 
 ## サービス層インターフェース（api/app/services/）
 
@@ -42,7 +53,8 @@ async def search(collection_id: UUID, question: str, top_k: int = 8) -> list[Ret
 
 # services/generation/__init__.py  (WS2が実装)
 async def stream_answer(question: str, chunks: list[RetrievedChunk]) -> AsyncIterator[str]:
-    """Geminiで出典引用付き回答をトークン単位でyield。出典は [1][2] 形式で本文中に引用。"""
+    """settings.llm_provider(既定ollama)に応じてGemini/Ollamaで出典引用付き回答を
+    トークン単位でyield。出典は [1][2] 形式で本文中に引用。"""
 ```
 
 `RetrievedChunk` は `api/app/schemas.py` に定義済み（chunk_id, document_id, filename, heading_path, content, score）。
@@ -84,7 +96,7 @@ stream=false → JSON `{"answer": "...", "sources": [...]}`
 {"id": "q001", "question": "...", "reference_answer": "...", "relevant": [{"filename": "doc.md", "heading_path": ["第2章"]}]}
 ```
 - 検索指標: recall@k (k=3,8), MRR, nDCG@8（relevantとchunkの突合はfilename一致 + heading_pathの**連続部分列一致**。チャンカーはheading_path先頭にH1タイトルを含むため、先頭固定の前方一致は使わない — 2026-08-08統合時に改定）
-- 生成指標: faithfulness / answer_relevancy（LLM-as-judge、Gemini使用）
+- 生成指標: faithfulness / answer_relevancy（LLM-as-judge。既定Ollama、`LLM_PROVIDER=gemini`でGeminiに切替）
 - 実行: `python eval/run_eval.py --api-url http://localhost:8000 --api-key ...` → `eval/results/` にJSON+Markdownレポート
 - サンプル文書は**公開ライセンスのもののみ**（省庁ガイドライン等）。`eval/corpus/` に置き出典をREADMEに明記
 

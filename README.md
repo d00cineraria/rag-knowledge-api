@@ -3,13 +3,14 @@
 [![CI](https://github.com/d00cineraria/rag-knowledge-api/actions/workflows/ci.yml/badge.svg)](https://github.com/d00cineraria/rag-knowledge-api/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Markdown/PDFをアップロードすると、**出典引用付き**でQAできる**ローカル完結**のRAG APIサービス。
+Markdown/PDFをアップロードすると、**出典引用付き**でQAできる**ローカル完結**のRAG APIサービス。**既定ではAPIキー0個・課金0円**で動く（Ollama常駐）。クラウドLLM（Gemini）へワンフラグで切り替えることもできる。
 
-特徴は3つ:
+特徴は4つ:
 
-1. **単一ファイルDBでゼロ運用** — SQLite + sqlite-vec（ベクトル検索）+ FTS5 trigram（日本語BM25）。DBサーバー不要、`uvicorn`起動だけで動く
-2. **日本語ハイブリッド検索** — BM25とベクトル検索をRRFで融合し、オプションでbge-reranker-v2-m3によるリランク
-3. **評価基盤を内蔵** — goldenデータセット26問に対して recall@k / MRR / nDCG / faithfulness を計測し、チャンク戦略や検索設定の変更を**数値で**判断できる
+1. **完全ローカル、APIキー不要がデフォルト** — embedding・回答生成・評価のLLM-as-judgeまで全てOllama（`nomic-embed-text` + `qwen3.5:9b`）で完結。`LLM_PROVIDER=gemini`でクラウド品質へ切替可能な、プロバイダ抽象化アーキテクチャ
+2. **単一ファイルDBでゼロ運用** — SQLite + sqlite-vec（ベクトル検索）+ FTS5 trigram（日本語BM25）。DBサーバー不要、`uvicorn`起動だけで動く
+3. **日本語ハイブリッド検索** — BM25とベクトル検索をRRFで融合し、オプションでbge-reranker-v2-m3によるリランク
+4. **評価基盤を内蔵** — goldenデータセット44問に対して recall@k / MRR / nDCG / faithfulness を計測し、チャンク戦略や検索設定の変更を**数値で**判断できる
 
 ## アーキテクチャ
 
@@ -22,15 +23,21 @@ Markdown/PDFをアップロードすると、**出典引用付き**でQAでき�
                             │
         ┌───────────────────┼──────────────────────┐
         ▼                   ▼                      ▼
-[SQLite (単一ファイル)]  [Gemini API]           [bge-reranker-v2-m3]
- sqlite-vec (KNN)        gemini-embedding-001    CPU / optional
- FTS5 trigram (BM25)     gemini-2.5-flash
+[SQLite (単一ファイル)]  [LLMプロバイダ抽象化]    [bge-reranker-v2-m3]
+ sqlite-vec (KNN)        Ollama(既定・ローカル)   CPU / optional
+ FTS5 trigram (BM25)      nomic-embed-text
+                          qwen3.5:9b
+                         Gemini(オプション)
+                          gemini-embedding-001
+                          gemini-2.5-flash
         ▲
         │ status='embedding' をポーリング (INGEST_MODE=worker のときのみ)
         │
 [Go worker (worker/)]
- batchEmbedContents でembedding → chunk_vectors へ書き込み
+ 同じプロバイダ抽象化(Ollama/Gemini)でembedding → chunk_vectors へ書き込み
 ```
+
+**`LLM_PROVIDER`**（既定 `ollama`）: embedding・回答生成・評価のLLM-as-judgeすべてに効く共通スイッチ。`ollama`ならAPIキー不要・ゼロ円、`gemini`なら品質は上がるが無料枠の日次クォータ制限を受ける。詳細は [docs/contracts.md](docs/contracts.md)「LLMプロバイダ抽象化」節。
 
 **`INGEST_MODE`**（既定 `inline`）:
 - `inline`: FastAPIがパース→チャンキング→embeddingまで1プロセスで完結（クイックスタート向け）
@@ -41,7 +48,12 @@ Markdown/PDFをアップロードすると、**出典引用付き**でQAでき�
 ## クイックスタート（Docker不要）
 
 ```bash
-cp .env.example .env   # GEMINI_API_KEY を設定（Google AI Studioで無料発行可）
+# 1. Ollamaを用意（未導入なら https://ollama.com/download ）
+ollama pull nomic-embed-text
+ollama pull qwen3.5:9b
+
+# 2. APIキー設定は不要（LLM_PROVIDER=ollamaが既定）
+cp .env.example .env
 
 cd api
 python -m venv .venv && source .venv/bin/activate
@@ -49,6 +61,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --port 8000
 # → http://localhost:8000/docs
 ```
+
+Geminiを使う場合は `.env` の `LLM_PROVIDER=gemini` に変更し `GEMINI_API_KEY` を設定する（Google AI Studioで無料発行可）。
 
 UI（任意）:
 
@@ -130,6 +144,19 @@ python eval/compare.py eval/results/<before>/report.json eval/results/<after>/re
 
 **再現性の注記**: 上表OFFの値がPhase 2表（MRR 0.752）と異なるのは、コーパスを再取り込みした別コレクションでの実測のため（embeddingの再計算とRRF同点順の揺れで、実測値は±0.1程度変動しうる）。A/B比較は必ず同一コレクション上で行うこと（`eval/compare.py`の使用前提）。
 
+### embeddingプロバイダ比較: Ollama(ローカル) vs Gemini（2026-08-09, retrieval-only, リランカーOFF, 44問）
+
+Phase 4でOllamaを既定プロバイダにしたため、同一golden・同一チャンクで埋め込みモデルの違いによる検索精度差を実測した:
+
+| 指標 | Ollama (nomic-embed-text, ゼロ円) | Gemini (gemini-embedding-001) |
+|---|---|---|
+| recall@3 | 0.824 | 0.946 |
+| recall@8 | 0.878 | 1.000 |
+| MRR | 0.712 | 0.865 |
+| nDCG@8 | 0.746 | 0.887 |
+
+この難化させた44問（Phase 2で追加した紛らわしい旧版・類似規程を含む）では、Gemini embeddingが全指標でOllama(nomic-embed-text)を上回る。**ゼロ円・オフライン**という運用面の利点と引き換えに、識別が難しいコーパスでは検索精度が明確に低下するというトレードオフを数値で確認した。用途に応じて`LLM_PROVIDER`で切替可能（リランカー併用でOllama側の順位付けを補う運用も選択肢）。
+
 ## 設計上の主な判断
 
 | 論点 | 判断 | 理由 |
@@ -137,7 +164,7 @@ python eval/compare.py eval/results/<before>/report.json eval/results/<after>/re
 | DB | SQLite単一ファイル | ローカル完結・ゼロ運用。中小規模の文書QAにはDBサーバーは過剰。PostgreSQL版（pgvector+PGroonga）は`v0.1-postgres`タグに保持し、スケール要件が出たら差し替え可能な構造 |
 | 日本語全文検索 | FTS5 trigram + 軽量クエリ分解 | 形態素解析の依存を増やさずCJKの部分文字列一致でBM25を成立させる。質問文は助詞ベースでOR分解（`build_fts_query`、純粋関数でテスト済み） |
 | 融合 | RRF (k=60) | スコアの正規化不要でBM25とcosineを安全に混ぜられる |
-| embedding | gemini-embedding-001 (768次元・L2正規化) | 低コスト・多言語。次元はMRL truncationで768に固定 |
+| LLM | Ollama既定・Gemini選択可（768次元・L2正規化） | ポートフォリオ運用でゼロ円を最優先。`embed_documents`/`embed_query`の共通プロバイダIFでいつでも差し替え可能にし、単なる「Gemini直呼び」で終わらせない設計にした |
 | リランカー | bge-reranker-v2-m3 / opt-in | CPU実行可・無料。重い依存はrequirements-reranker.txtに分離 |
 | 評価 | 内蔵・CI組込 | チューニングの根拠を数値で残す（このリポジトリの主眼） |
 
@@ -149,14 +176,19 @@ python eval/compare.py eval/results/<before>/report.json eval/results/<after>/re
 - [x] Phase 1.5: SQLite + sqlite-vec によるローカル完結化（PostgreSQL版は`v0.1-postgres`）
 - [x] Phase 2: 評価セットの識別力強化（文書追加・言い換え・複数文書横断問題）※生成指標の実測はGemini生成API無料枠回復後に別途実施
 - [x] Phase 3: 取り込みワーカーのGo実装（`INGEST_MODE=worker`、[worker/README.md](worker/README.md)）
+- [x] Phase 4: Ollamaプロバイダ対応（embedding・生成・LLM-as-judgeを`LLM_PROVIDER`で切替、既定ollama・APIキー不要）
+- [ ] Phase 5: 生成指標（faithfulness/answer_relevancy）の実測（Ollama常駐化でクォータ制約なく再測定）
 
 ## 開発
 
 ```bash
 cd api
 pip install -r requirements-dev.txt
-ruff check . && pytest -q          # APIテスト43件（実SQLiteでの統合テスト含む）
-python -m pytest ../eval/tests     # 評価基盤テスト30件
+ruff check . && pytest -q          # APIテスト55件（実SQLiteでの統合テスト含む）
+python -m pytest ../eval/tests     # 評価基盤テスト38件
+
+cd ../worker
+go vet ./... && go test ./...      # Goワーカーテスト27件
 ```
 
 ## License
